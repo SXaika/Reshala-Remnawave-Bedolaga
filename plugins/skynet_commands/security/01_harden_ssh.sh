@@ -42,7 +42,7 @@ declare -A ssh_settings=(
     ["UsePAM"]="yes"
     ["X11Forwarding"]="no"
     ["PermitEmptyPasswords"]="no"
-    ["MaxAuthTries"]="3"
+    ["MaxAuthTries"]="6"
 )
 
 for key in "${!ssh_settings[@]}"; do

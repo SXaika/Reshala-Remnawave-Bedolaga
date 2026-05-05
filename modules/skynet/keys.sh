@@ -60,17 +60,21 @@ _deploy_key_to_host() {
 
     printf "   👉 %s@%s:%s... " "$user" "$ip" "$port"
     # Сначала пробуем тихо войти по ключу, вдруг доступ уже есть
-    if ssh -q -o BatchMode=yes -o ConnectTimeout=3 -o StrictHostKeyChecking=no -i "$key_path" -p "$port" "${user}@${ip}" exit; then
+    if ssh -q -F /dev/null -o IdentitiesOnly=yes -o BatchMode=yes -o ConnectTimeout=3 -o StrictHostKeyChecking=no -i "$key_path" -p "$port" "${user}@${ip}" exit; then
         ok "ДОСТУП ЕСТЬ!"
         return 0
     fi
 
     printf "\n"; warn "🔓 Вводи пароль (один раз), чтобы закинуть ключ..."
-    if ssh-copy-id -o StrictHostKeyChecking=no -i "${key_path}.pub" -p "$port" "${user}@${ip}"; then
+    if ssh-copy-id -f -o IdentitiesOnly=yes -o StrictHostKeyChecking=no -i "${key_path}.pub" -p "$port" "${user}@${ip}"; then
         ok "Ключ установлен!"
         return 0
     else
-        err "Не удалось (неверный пароль или SSH недоступен)"
+        err "Не удалось закинуть ключ."
+        printf_description "Возможные причины:"
+        printf_description "1. Неверный пароль или SSH недоступен."
+        printf_description "2. На сервере запрещен вход по паролю (PasswordAuthentication no)."
+        printf_description "3. Сработал Fail2Ban (смени IP или подожди)."
         return 1
     fi
 }
