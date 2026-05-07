@@ -243,22 +243,31 @@ _show_server_management_menu() {
     local s_name s_user s_ip s_port s_key s_pass; IFS='|' read -r s_name s_user s_ip s_port s_key s_pass <<< "$server_data"
     
     _sm_connect() {
-        # Лечим ключ хоста на случай, если он изменился
-        _skynet_heal_host_key "$s_ip" "$s_port"
-        
         clear
         printf_info "🚀 SKYNET UPLINK: Подключаюсь к ${s_name}..."
 
-        # Проверяем, работает ли вход по ключу. Если нет - предлагаем закинуть ключ.
+        # Проверяем, работает ли вход по ключу.
         if ! ssh -q -F /dev/null -o IdentitiesOnly=yes -o BatchMode=yes -o ConnectTimeout=5 -o StrictHostKeyChecking=no -i "$s_key" -p "$s_port" "${s_user}@${s_ip}" exit; then
             printf_warning "Не удалось войти по ключу. Возможно, сервер был переустановлен."
             if ask_yes_no "Хочешь закинуть ключ на сервер сейчас (потребуется пароль)?"; then
-                if ! ssh-copy-id -f -o IdentitiesOnly=yes -o StrictHostKeyChecking=no -i "${s_key}.pub" -p "$s_port" "${s_user}@${s_ip}"; then
+                # Лечим fingerprint только когда реально нужно (перед повторной попыткой)
+                _skynet_heal_host_key "$s_ip" "$s_port"
+                # ВАЖНО: убираем IdentitiesOnly=yes — он блокирует аутентификацию паролем!
+                # ssh-copy-id должен войти паролем, чтобы скопировать ключ.
+                if ! ssh-copy-id -f -o StrictHostKeyChecking=no -i "${s_key}.pub" -p "$s_port" "${s_user}@${s_ip}"; then
                     err "Не удалось установить ключ. Проверь пароль или доступность SSH."
                     wait_for_enter
                     return
                 fi
                 ok "Ключ успешно установлен!"
+                # Проверяем, что ключ теперь реально работает
+                printf "   🔑 Проверяю доступ по ключу... "
+                if ! ssh -q -F /dev/null -o IdentitiesOnly=yes -o BatchMode=yes -o ConnectTimeout=5 -o StrictHostKeyChecking=no -i "$s_key" -p "$s_port" "${s_user}@${s_ip}" exit; then
+                    err "Ключ установлен, но вход по нему всё равно не работает. Возможно, на сервере запрещён вход по паролю (PasswordAuthentication no)."
+                    wait_for_enter
+                    return
+                fi
+                ok "Ключ работает!"
             else
                 info "Отмена. Дальнейшие операции могут потребовать пароль."
             fi

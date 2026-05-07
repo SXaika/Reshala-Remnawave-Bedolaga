@@ -66,7 +66,9 @@ _deploy_key_to_host() {
     fi
 
     printf "\n"; warn "🔓 Вводи пароль (один раз), чтобы закинуть ключ..."
-    if ssh-copy-id -f -o IdentitiesOnly=yes -o StrictHostKeyChecking=no -i "${key_path}.pub" -p "$port" "${user}@${ip}"; then
+    # ВАЖНО: без IdentitiesOnly=yes — он блокирует аутентификацию паролем,
+    # а ssh-copy-id должен войти паролем, чтобы скопировать ключ
+    if ssh-copy-id -f -o StrictHostKeyChecking=no -i "${key_path}.pub" -p "$port" "${user}@${ip}"; then
         ok "Ключ установлен!"
         return 0
     else
