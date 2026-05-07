@@ -279,7 +279,7 @@ _run_speedtest() {
         echo ""
         
         printf_menu_option "1" "🏎️  Умный замер для Дашборда (Ookla)"
-        printf_description "     └ Автоматически выбирает ближайший сервер, считает VPN-вместимость."
+        printf_description "Автоматически выбирает ближайший сервер, считает VPN-вместимость."
         
         echo -e "\n  ${C_CYAN}🌍 Зарубежные провайдеры (Global):${C_RESET}"
         printf_menu_option "2" "Классический Bench.sh (Диск + Сеть по миру)"
@@ -319,13 +319,14 @@ _run_speedtest() {
                 wait_for_enter
                 ;;
             2)
-                clear; menu_header "🌍 Запуск Bench.sh"; echo "Загрузка скрипта..."; wget -qO- bench.sh | bash; wait_for_enter ;;
+                # Внешние bench-скрипты сами показывают паузу в конце — не дублируем wait_for_enter
+                clear; menu_header "🌍 Запуск Bench.sh"; echo "Загрузка скрипта..."; wget -qO- bench.sh | bash ;;
             3)
-                clear; menu_header "🌍 Запуск speed.tlab.pw"; echo "Загрузка скрипта..."; wget -qO- speed.tlab.pw | bash; wait_for_enter ;;
+                clear; menu_header "🌍 Запуск speed.tlab.pw"; echo "Загрузка скрипта..."; wget -qO- speed.tlab.pw | bash ;;
             4)
-                clear; menu_header "🇷🇺 Запуск bench.gig.ovh"; echo "Загрузка скрипта..."; wget -qO- bench.gig.ovh | bash; wait_for_enter ;;
+                clear; menu_header "🇷🇺 Запуск bench.gig.ovh"; echo "Загрузка скрипта..."; wget -qO- bench.gig.ovh | bash ;;
             5)
-                clear; menu_header "🇷🇺 Запуск bench.tlab.pw"; echo "Загрузка скрипта..."; wget -qO- bench.tlab.pw | bash; wait_for_enter ;;
+                clear; menu_header "🇷🇺 Запуск bench.tlab.pw"; echo "Загрузка скрипта..."; wget -qO- bench.tlab.pw | bash ;;
             [bB]) break ;;
             *) err "Неверный выбор."; sleep 1 ;;
         esac
