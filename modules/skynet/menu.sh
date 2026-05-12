@@ -54,10 +54,8 @@ _skynet_add_server_wizard() {
     local s_user; s_user=$(safe_read "Пользователь: " "$SKYNET_DEFAULT_USER"); s_user="${s_user//|/}"
     local s_port; s_port=$(safe_read "SSH порт: " "$SKYNET_DEFAULT_PORT"); s_port="${s_port//|/}"
     local s_pass=""
-    if [[ "$s_user" != "root" ]]; then
-        s_pass=$(ask_password "Пароль sudo (или Enter): ")
-        s_pass="${s_pass//|/}"
-    fi
+    s_pass=$(ask_password "Пароль SSH/sudo (Enter, если доступ по ключу): ")
+    s_pass="${s_pass//|/}"
 
     echo
     printf_info "Выбери SSH ключ для этого сервера:"
@@ -452,7 +450,7 @@ REMOTE_SCRIPT
     }
     _sm_security() { _show_server_security_menu "$server_idx" "$server_data"; }
     _sm_edit() {
-        info "Редактирование: ${s_name}"; local n; n=$(safe_read "Имя" "$s_name")||return; n="${n//|/}"; local u; u=$(safe_read "Пользователь" "$s_user")||return; u="${u//|/}"; local i; i=$(safe_read "IP" "$s_ip")||return; i="${i//|/}"; local p; p=$(safe_read "Порт" "$s_port")||return; p="${p//|/}"; local k; k=$(safe_read "Ключ" "$s_key")||return; k="${k//|/}"; local pw; pw=$(ask_password "Пароль sudo (Enter, чтобы оставить):"); if [[ -z "$pw" ]]; then pw=$s_pass; else pw="${pw//|/}"; fi
+        info "Редактирование: ${s_name}"; local n; n=$(safe_read "Имя" "$s_name")||return; n="${n//|/}"; local u; u=$(safe_read "Пользователь" "$s_user")||return; u="${u//|/}"; local i; i=$(safe_read "IP" "$s_ip")||return; i="${i//|/}"; local p; p=$(safe_read "Порт" "$s_port")||return; p="${p//|/}"; local k; k=$(safe_read "Ключ" "$s_key")||return; k="${k//|/}"; local pw; pw=$(ask_password "Пароль SSH/sudo (Enter, чтобы оставить):"); if [[ -z "$pw" ]]; then pw=$s_pass; else pw="${pw//|/}"; fi
         server_data="${n}|${u}|${i}|${p}|${k}|${pw}"; _update_fleet_record "$server_idx" "$server_data"; s_name=$n; s_user=$u; s_ip=$i; s_port=$p; s_key=$k; s_pass=$pw; ok "Запись обновлена."; wait_for_enter
     }
     _sm_delete() { 
