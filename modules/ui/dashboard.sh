@@ -378,6 +378,14 @@ show() {
             bot_ver_pretty="v${BOT_VERSION}"
         fi
     fi
+    local sub_ver_pretty=""
+    if [[ -n "$SUBPAGE_VERSION" ]]; then
+        if [[ "$SUBPAGE_VERSION" == latest* ]]; then
+            sub_ver_pretty="$SUBPAGE_VERSION"
+        else
+            sub_ver_pretty="v${SUBPAGE_VERSION}"
+        fi
+    fi
 
     # Remnawave / Нода / Бот (данные даёт state_scanner)
     case "$SERVER_TYPE" in
@@ -386,11 +394,10 @@ show() {
             print_key_value "Версии" "P: ${panel_ver_pretty:-?} | N: ${node_ver_pretty:-?}" "$min_label_width"
             ;;
         "Панель, Нода и Sub-page")
-            print_key_value "Remnawave" "${C_GREEN}🔥 FULL STACK (Панель + Нода + Sub-page)${C_RESET}" "$min_label_width"
-            print_key_value "Версии" "P: ${panel_ver_pretty:-?} | N: ${node_ver_pretty:-?} | S: v${SUBPAGE_VERSION:-?}" "$min_label_width"
+            print_key_value "Версии" "P: ${panel_ver_pretty:-?} | N: ${node_ver_pretty:-?} | S: ${sub_ver_pretty:-?}" "$min_label_width"
             ;;
         "Панель + Sub-page")
-            print_key_value "Remnawave" "${C_GREEN}Панель (v${panel_ver_pretty:-?}) + Sub-page (v${SUBPAGE_VERSION:-?})${C_RESET}" "$min_label_width"
+            print_key_value "Remnawave" "${C_GREEN}Панель (${panel_ver_pretty:-?}) + Sub-page (${sub_ver_pretty:-?})${C_RESET}" "$min_label_width"
             ;;
         "Панель")
             print_key_value "Remnawave" "${C_GREEN}Панель управления${C_RESET} (${panel_ver_pretty:-unknown})" "$min_label_width"
@@ -399,10 +406,10 @@ show() {
             print_key_value "Remnawave" "${C_GREEN}Боевая Нода${C_RESET} (${node_ver_pretty:-unknown})" "$min_label_width"
             ;;
         "Sub-page и Нода")
-            print_key_value "Remnawave" "${C_CYAN}Sub-page (v${SUBPAGE_VERSION:-?}) + Нода (v${node_ver_pretty:-?})${C_RESET}" "$min_label_width"
+            print_key_value "Remnawave" "${C_CYAN}Sub-page (${sub_ver_pretty:-?}) + Нода (${node_ver_pretty:-?})${C_RESET}" "$min_label_width"
             ;;
         "Sub-page подписки")
-            print_key_value "Remnawave" "${C_CYAN}Страница подписки (Sub-page)${C_RESET} (v${SUBPAGE_VERSION:-unknown})" "$min_label_width"
+            print_key_value "Remnawave" "${C_CYAN}Страница подписки (Sub-page)${C_RESET} (${sub_ver_pretty:-unknown})" "$min_label_width"
             ;;
         "Сервак не целка")
             print_key_value "Remnawave" "${C_RED}НЕ НАЙДЕНО / СТОРОННИЙ СОФТ${C_RESET}" "$min_label_width"

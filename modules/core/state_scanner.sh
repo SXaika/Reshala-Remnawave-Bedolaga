@@ -111,13 +111,11 @@ _state_get_panel_version_from_logs() {
         fi
     done <<< "$container_names"
 
-    if run_cmd docker ps --format '{{.Names}}' 2>/dev/null | grep -q "remnawave-subscription-page"; then
-        local sub_ver
-        sub_ver=$(run_cmd docker logs remnawave-subscription-page 2>/dev/null | grep -oE 'Remnawave Subscription Page v[0-9.]*' | tail -n 1 | sed 's/Remnawave Subscription Page v//')
-        if [ -n "$sub_ver" ]; then
-            echo "${sub_ver}"
-            return
-        fi
+    # Если в логах не нашли, пробуем через инспекцию контейнера (Labels/Env)
+    local first_panel; first_panel=$(echo "$container_names" | head -n 1)
+    if [[ -n "$first_panel" ]]; then
+        _state_get_docker_version "$first_panel"
+        return
     fi
 
     echo "latest"
