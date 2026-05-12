@@ -107,17 +107,30 @@ _skynet_add_server_wizard() {
         # Проверяем соединение и предлагаем усилить безопасность
         if ssh -q -F /dev/null -o IdentitiesOnly=yes -o BatchMode=yes -o ConnectTimeout=5 -o StrictHostKeyChecking=no -i "$final_key" -p "$s_port" "${s_user}@${s_ip}" "echo OK" &>/dev/null; then
             printf_ok "Тестовое подключение по ключу прошло успешно."
-            if ask_yes_no "Вырубаем вход по паролю и оставляем только ключи? (y/n)"; then
+            # Проверяем, уже ли выключен вход по паролю — не задаём лишний вопрос
+            local _pw_auth
+            _pw_auth=$(ssh -q -F /dev/null -o IdentitiesOnly=yes -o BatchMode=yes -o ConnectTimeout=5 \
+                -o StrictHostKeyChecking=no -i "$final_key" -p "$s_port" "${s_user}@${s_ip}" \
+                "sshd -T 2>/dev/null | grep -i '^passwordauthentication'" 2>/dev/null | awk '{print tolower($2)}')
+            if [[ "$_pw_auth" == "no" ]]; then
+                printf_ok "Вход по паролю уже отключён на сервере ✓"
+            elif ask_yes_no "Вырубаем вход по паролю и оставляем только ключи? (y/n)"; then
                 local harden_cmd="sed -i.bak -E 's/^#?PasswordAuthentication\s+.*/PasswordAuthentication no/' /etc/ssh/sshd_config && (systemctl reload sshd 2>/dev/null || systemctl reload ssh 2>/dev/null || service sshd restart 2>/dev/null || service ssh restart 2>/dev/null)"
                 if [[ "$s_user" == "root" ]]; then
                     ssh -t -F /dev/null -o IdentitiesOnly=yes -o StrictHostKeyChecking=no -i "$final_key" -p "$s_port" "${s_user}@${s_ip}" "$harden_cmd"
                     stty sane
+                elif [[ -n "$s_pass" ]]; then
+                    ssh -t -F /dev/null -o IdentitiesOnly=yes -o StrictHostKeyChecking=no -i "$final_key" -p "$s_port" "${s_user}@${s_ip}" "echo '$s_pass' | sudo -S -p '' bash -c '$harden_cmd'"
+                    stty sane
                 else
-                    if [[ -n "$s_pass" ]]; then
-                        ssh -t -F /dev/null -o IdentitiesOnly=yes -o StrictHostKeyChecking=no -i "$final_key" -p "$s_port" "${s_user}@${s_ip}" "echo '$s_pass' | sudo -S -p '' bash -c '$harden_cmd'"
+                    # Пробуем NOPASSWD sudo
+                    if ssh -q -F /dev/null -o IdentitiesOnly=yes -o BatchMode=yes -o ConnectTimeout=5 \
+                           -o StrictHostKeyChecking=no -i "$final_key" -p "$s_port" "${s_user}@${s_ip}" \
+                           "sudo -n true" 2>/dev/null; then
+                        ssh -t -F /dev/null -o IdentitiesOnly=yes -o StrictHostKeyChecking=no -i "$final_key" -p "$s_port" "${s_user}@${s_ip}" "sudo -n bash -c '$harden_cmd'"
                         stty sane
                     else
-                        printf_warning "Пароль sudo не указан."
+                        printf_warning "Пароль sudo не указан — пропускаю."
                     fi
                 fi
             fi
@@ -274,11 +287,22 @@ _show_server_management_menu() {
         fi
 
         if [[ "$s_user" != "root" && -z "$s_pass" ]]; then
-            s_pass=$(ask_password "Введи пароль для '$s_user': ")
-            if [[ -n "$s_pass" ]] && ask_yes_no "Сохранить пароль в базу?" "n"; then
-                server_data="$s_name|$s_user|$s_ip|$s_port|$s_key|$s_pass"
-                _update_fleet_record "$server_idx" "$server_data"
-                ok "Пароль сохранён."
+            # Сначала проверяем, нужен ли sudo-пароль вообще (NOPASSWD?)
+            printf "   🔑 Проверяю права sudo... "
+            if ssh -q -F /dev/null -o IdentitiesOnly=yes -o BatchMode=yes -o ConnectTimeout=5 \
+                   -o StrictHostKeyChecking=no -i "$s_key" -p "$s_port" "${s_user}@${s_ip}" \
+                   "sudo -n true" 2>/dev/null; then
+                printf "${C_GREEN}NOPASSWD ✓${C_RESET}\n"
+                info "Sudo без пароля обнаружен — пароль не нужен."
+                # s_pass остаётся пустым, sudo -n будет использоваться ниже
+            else
+                printf "${C_YELLOW}требуется пароль${C_RESET}\n"
+                s_pass=$(ask_password "Введи пароль sudo для '$s_user': ")
+                if [[ -n "$s_pass" ]] && ask_yes_no "Сохранить пароль в базу?" "n"; then
+                    server_data="$s_name|$s_user|$s_ip|$s_port|$s_key|$s_pass"
+                    _update_fleet_record "$server_idx" "$server_data"
+                    ok "Пароль сохранён."
+                fi
             fi
         fi
 
@@ -286,8 +310,11 @@ _show_server_management_menu() {
             local cmd_to_run="$1"
             if [[ "$s_user" == "root" ]]; then
                 ssh -F /dev/null -o IdentitiesOnly=yes -o StrictHostKeyChecking=no -o ConnectTimeout=5 -i "$s_key" -p "$s_port" "$s_user@$s_ip" "$cmd_to_run"
-            else
+            elif [[ -n "$s_pass" ]]; then
                 ssh -F /dev/null -o IdentitiesOnly=yes -o StrictHostKeyChecking=no -o ConnectTimeout=5 -i "$s_key" -p "$s_port" "$s_user@$s_ip" "echo '$s_pass' | sudo -S -p '' bash -c '$cmd_to_run'"
+            else
+                # NOPASSWD sudo
+                ssh -F /dev/null -o IdentitiesOnly=yes -o StrictHostKeyChecking=no -o ConnectTimeout=5 -i "$s_key" -p "$s_port" "$s_user@$s_ip" "sudo -n bash -c '$cmd_to_run'"
             fi
         }
 
@@ -391,9 +418,14 @@ REMOTE_SCRIPT
 
         if [[ "$s_user" == "root" ]]; then
             ssh "${ssh_opts[@]}" "$remote_target" "$remote_exec_command"
-        else
-            local sudo_wrapper_command="echo '$s_pass' | sudo -S -p '' ${remote_exec_command}"
+        elif [[ -n "$s_pass" ]]; then
+            # Важно: перенаправляем stdin обратно на терминал (< /dev/tty), 
+            # иначе интерактивное меню Решалы попытается читать из трубы (pipe) от команды echo '$s_pass'
+            local sudo_wrapper_command="echo '$s_pass' | sudo -S -p '' bash -c \"${remote_exec_command} < /dev/tty\""
             ssh "${ssh_opts[@]}" "$remote_target" "$sudo_wrapper_command"
+        else
+            # NOPASSWD sudo (проверено выше через sudo -n true)
+            ssh "${ssh_opts[@]}" "$remote_target" "sudo -n ${remote_exec_command}"
         fi
         
         stty sane
