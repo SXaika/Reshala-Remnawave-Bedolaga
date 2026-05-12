@@ -151,20 +151,30 @@ _ext_run_script() {
             echo ""
             printf_error "Команда '${_bin}' не найдена на сервере."
             echo ""
-            # Подсказка по установке для популярных инструментов
+            
+            local pkg_name="$_bin"
+            # Для специфичных бинарников, имена пакетов которых отличаются, можно добавить алиасы
             case "$_bin" in
-                sysbench)  printf_info "Установить: ${C_CYAN}apt install sysbench${C_RESET}" ;;
-                iperf3)    printf_info "Установить: ${C_CYAN}apt install iperf3${C_RESET}" ;;
-                fio)       printf_info "Установить: ${C_CYAN}apt install fio${C_RESET}" ;;
-                htop)      printf_info "Установить: ${C_CYAN}apt install htop${C_RESET}" ;;
-                nmap)      printf_info "Установить: ${C_CYAN}apt install nmap${C_RESET}" ;;
-                ncdu)      printf_info "Установить: ${C_CYAN}apt install ncdu${C_RESET}" ;;
-                stress)    printf_info "Установить: ${C_CYAN}apt install stress${C_RESET}" ;;
-                *)         printf_info "Установить через пакетный менеджер: ${C_CYAN}apt install ${_bin}${C_RESET}" ;;
+                # Здесь можно сопоставить бинарник и пакет, если они отличаются
+                *) pkg_name="$_bin" ;;
             esac
-            echo ""
-            wait_for_enter
-            return 1
+
+            printf_info "⚙️  Пробую автоматически установить '${pkg_name}'..."
+            
+            if DEBIAN_FRONTEND=noninteractive apt-get update >/dev/null 2>&1 && \
+               DEBIAN_FRONTEND=noninteractive apt-get install -y "$pkg_name" >/dev/null 2>&1; then
+                printf_ok "Пакет '${pkg_name}' успешно установлен! Продолжаю запуск..."
+                sleep 1
+                # Сбрасываем кэш путей, чтобы bash увидел новую команду
+                hash -r 2>/dev/null || true
+            else
+                echo ""
+                printf_error "Не удалось установить пакет автоматически."
+                printf_info "Для ручной установки выполни: ${C_CYAN}apt install ${pkg_name}${C_RESET}"
+                echo ""
+                wait_for_enter
+                return 1
+            fi
         fi
     fi
 

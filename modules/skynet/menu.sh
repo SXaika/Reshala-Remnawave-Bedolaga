@@ -400,13 +400,9 @@ REMOTE_SCRIPT
             if scp -q -P "$s_port" -F /dev/null -o IdentitiesOnly=yes -i "$s_key" \
                -o StrictHostKeyChecking=no -o ConnectTimeout=5 \
                "$tmp_ctx" "${s_user}@${s_ip}:/tmp/reshala_ctx.sh" 2>/dev/null; then
-                local exec_cmd="bash /tmp/reshala_ctx.sh; rm -f /tmp/reshala_ctx.sh"
-                if [[ "$s_user" != "root" && -n "$s_pass" ]]; then
-                    exec_cmd="echo '$s_pass' | sudo -S -p '' bash -c '$exec_cmd'"
-                fi
-                ssh -F /dev/null -o IdentitiesOnly=yes -o StrictHostKeyChecking=no \
-                    -o ConnectTimeout=5 -i "$s_key" -p "$s_port" \
-                    "${s_user}@${s_ip}" "$exec_cmd" 2>/dev/null
+                
+                # Используем run_remote, чтобы корректно обработать NOPASSWD sudo
+                run_remote "bash /tmp/reshala_ctx.sh; rm -f /tmp/reshala_ctx.sh" >/dev/null 2>&1
             fi
             rm -f "$tmp_ctx"
         }
