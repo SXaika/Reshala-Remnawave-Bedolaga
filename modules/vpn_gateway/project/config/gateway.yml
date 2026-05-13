@@ -48,10 +48,10 @@ project:
 
 edge:
   # Публичный HTTP-порт edge (ACME + redirect на HTTPS)
-  http_port: 8089
+  http_port: 80
 
   # Публичный HTTPS-порт edge
-  https_port: 8443
+  https_port: 443
 
 security:
   # Убирать чувствительные origin-заголовки
