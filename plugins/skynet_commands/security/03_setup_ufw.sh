@@ -80,6 +80,52 @@ ufw allow 443/tcp comment 'VPN/HTTPS' >/dev/null
 ufw allow 443/udp comment 'VPN/UDP' >/dev/null
 ok "Порты 443 TCP/UDP (VPN) открыты."
 
+# --- Docker UFW Fix (Professional) ---
+if command -v docker &>/dev/null; then
+    info "Обнаружен Docker. Применяю Professional UFW Fix..."
+    iface=$(ip -o -4 route show to default 2>/dev/null | awk '{print $5}' | head -1)
+    iface=${iface:-eth0}
+    after_rules="/etc/ufw/after.rules"
+    marker_start="# --- НАЧАЛО: Reshala Docker UFW Fix ---"
+    marker_end="# --- КОНЕЦ: Reshala Docker UFW Fix ---"
+    
+    # Чистим старое
+    sed -i "/${marker_start}/,/${marker_end}/d" "$after_rules"
+    
+    # Вставляем блок
+    python3 - "$after_rules" "$marker_start" "$marker_end" "$iface" <<'PYEOF'
+import sys
+rules_file, marker_s, marker_e, iface = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
+with open(rules_file, 'r') as f:
+    content = f.read()
+docker_block = f"""
+{marker_s}
+*filter
+:DOCKER-USER - [0:0]
+-A DOCKER-USER -m conntrack --ctstate RELATED,ESTABLISHED -j RETURN
+-A DOCKER-USER -i {iface} -p udp -m udp --sport 53 --dport 1024:65535 -j RETURN
+-A DOCKER-USER -i {iface} -j ufw-user-forward
+-A DOCKER-USER -i {iface} -j DROP
+-A DOCKER-USER -j RETURN
+COMMIT
+{marker_e}
+"""
+if 'COMMIT' in content:
+    idx = content.rfind('COMMIT')
+    content = content[:idx] + docker_block + content[idx:]
+else:
+    content += docker_block
+with open(rules_file, 'w') as f:
+    f.write(content)
+PYEOF
+    
+    # Синхронизация портов в route
+    info "Синхронизирую текущие правила UFW с Docker (route)..."
+    for p in $TARGET_SSH_PORT 443; do
+        ufw route allow "$p" >/dev/null 2>&1 || true
+    done
+fi
+
 # Включаем UFW
 echo "y" | ufw enable >/dev/null
 ok "UFW активирован и работает (IPv6: ON)."

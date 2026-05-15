@@ -246,5 +246,15 @@ _ssh_update_fail2ban_ports() {
     info "Обновляю порты SSH в Fail2Ban: ${ssh_ports}"
     # Обновляем порт в секции [sshd]
     run_cmd sed -i "/^\[sshd\]/,/^\[/ s/^port\s*=.*/port = ${ssh_ports}/" /etc/fail2ban/jail.local
+    
+    # Также обновляем action, если там указаны конкретные порты (не any)
+    # Ищем строку action = ufw[name=sshd, port=..., ...]
+    if grep -A 10 "\[sshd\]" /etc/fail2ban/jail.local | grep -q "action.*port="; then
+        if ! grep -A 10 "\[sshd\]" /etc/fail2ban/jail.local | grep -q "action.*port=any"; then
+             info "Синхронизирую порты в action Fail2Ban..."
+             run_cmd sed -i "/^\[sshd\]/,/^\[/ s/port=[0-9,]\+/port=${ssh_ports}/" /etc/fail2ban/jail.local
+        fi
+    fi
+    
     run_cmd systemctl reload fail2ban 2>/dev/null || true
 }

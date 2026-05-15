@@ -367,12 +367,20 @@ _firewall_add_rule() {
             if [[ -n "$ip" ]]; then
                 if ask_yes_no "Открыть порт ${port} только для IP ${ip}?"; then
                     run_cmd ufw allow from "$ip" to any port "$port" comment "Manual Rule"
-                    ok "Правило добавлено."
+                    # Если фикс докера применен, добавляем и в route
+                    if grep -q "Reshala Docker UFW Fix" /etc/ufw/after.rules 2>/dev/null; then
+                        run_cmd ufw route allow from "$ip" to any port "$port" comment "Docker Sync" >/dev/null 2>&1 || true
+                    fi
+                    ok "Правило добавлено (включая Docker Route)."
                 fi
             else
                 if ask_yes_no "Открыть порт ${port} для всех?"; then
                     run_cmd ufw allow "$port" comment "Manual Rule"
-                    ok "Правило добавлено."
+                    # Если фикс докера применен, добавляем и в route
+                    if grep -q "Reshala Docker UFW Fix" /etc/ufw/after.rules 2>/dev/null; then
+                        run_cmd ufw route allow "$port" comment "Docker Sync" >/dev/null 2>&1 || true
+                    fi
+                    ok "Правило добавлено (включая Docker Route)."
                 fi
             fi
             ;;
@@ -635,10 +643,14 @@ with open(rules_file, 'r') as f:
 
 docker_block = f"""
 {marker_s}
+# Эти правила заставляют Docker-трафик проходить через фильтрацию UFW.
+# Теперь команды типа 'ufw route allow/deny' будут корректно работать для контейнеров.
 *filter
 :DOCKER-USER - [0:0]
--A DOCKER-USER -i {iface} -p tcp --dport 80 -j ACCEPT
--A DOCKER-USER -i {iface} -p tcp --dport 443 -j ACCEPT
+-A DOCKER-USER -m conntrack --ctstate RELATED,ESTABLISHED -j RETURN
+-A DOCKER-USER -i {iface} -p udp -m udp --sport 53 --dport 1024:65535 -j RETURN
+-A DOCKER-USER -i {iface} -j ufw-user-forward
+-A DOCKER-USER -i {iface} -j DROP
 -A DOCKER-USER -j RETURN
 COMMIT
 {marker_e}
@@ -658,8 +670,17 @@ PYEOF
 
     if [[ $? -eq 0 ]]; then
         ok "Блок Docker UFW Fix добавлен в ${after_rules} (интерфейс: ${iface})"
+        
+        # 3. Автоматически переносим текущие правила в route для Docker
+        info "Синхронизирую существующие правила с Docker (route)..."
+        local existing_ports
+        existing_ports=$(ufw status | grep "ALLOW" | grep -v "(v6)" | awk '{print $1}' | grep -oE '^[0-9]+' | sort -u)
+        for p in $existing_ports; do
+            run_cmd ufw route allow "$p" >/dev/null 2>&1 || true
+        done
+        
         run_cmd ufw reload 2>/dev/null || true
-        ok "UFW перезагружен. Docker-контейнеры должны быть доступны."
+        ok "UFW перезагружен. Все текущие порты теперь открыты и для Docker-контейнеров."
     else
         err "Не удалось добавить блок в after.rules. Добавьте вручную."
         warn "Руководство: https://docs.docker.com/network/iptables/"

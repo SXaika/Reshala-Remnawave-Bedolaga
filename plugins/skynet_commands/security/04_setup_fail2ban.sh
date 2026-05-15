@@ -66,6 +66,12 @@ run() {
         ssh_logpath="SYSLOG"
     fi
 
+    # Определяем действие (Action) - используем UFW если он есть
+    local b_action="ufw[name=sshd, port=any, protocol=tcp]"
+    if ! command -v ufw &>/dev/null; then
+        b_action="iptables-multiport[name=sshd, port=\"$current_port\", protocol=tcp]"
+    fi
+
     cat > "$JAIL_CONFIG" <<EOF
 [DEFAULT]
 bantime = 86400
@@ -79,6 +85,7 @@ enabled = true
 port = $current_port
 filter = sshd
 logpath = $ssh_logpath
+action = $b_action
 EOF
 
     ok "Конфигурация jail.local обновлена (ignoreip синхронизирован)."
