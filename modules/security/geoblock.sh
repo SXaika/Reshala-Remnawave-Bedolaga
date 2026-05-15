@@ -364,7 +364,7 @@ _geo_activate() {
         mapfile -t wl_ips < <(global_whitelist_get_ips)
         # Создаем whitelist ipset
         run_cmd ipset destroy reshala_geo_whitelist 2>/dev/null || true
-        run_cmd ipset create reshala_geo_whitelist hash:ip hashsize 256 maxelem 1024 2>/dev/null || true
+        run_cmd ipset create reshala_geo_whitelist hash:net hashsize 256 maxelem 1024 2>/dev/null || true
         for ip in "${wl_ips[@]}"; do
             run_cmd ipset add reshala_geo_whitelist "$ip" 2>/dev/null || true
         done
@@ -480,7 +480,7 @@ done < "\$COUNTRIES_FILE"
 
 # Whitelist
 ipset destroy reshala_geo_whitelist 2>/dev/null || true
-ipset create reshala_geo_whitelist hash:ip hashsize 256 maxelem 1024 2>/dev/null || true
+ipset create reshala_geo_whitelist hash:net hashsize 256 maxelem 1024 2>/dev/null || true
 if [[ -f "${GLOBAL_WHITELIST_FILE}" ]]; then
     grep -v '^\s*#' "${GLOBAL_WHITELIST_FILE}" | grep -v '^\s*$' | awk '{print \$1}' | while read -r ip; do
         ipset add reshala_geo_whitelist "\$ip" 2>/dev/null || true

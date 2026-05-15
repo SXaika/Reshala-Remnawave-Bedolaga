@@ -98,7 +98,7 @@ show_traffic_limiter_menu() {
         printf_menu_option "6" "📜 Посмотреть лог сервиса"
         printf_menu_option "7" "🔄 Перезапустить движок"
         printf_menu_option "8" "📈 Мониторинг (iftop)"
-        printf_menu_option "9" "🛡️  Белый список (Whitelist) ${wl_status}"
+        printf_menu_option "9" "🛡️  Белый список (Whitelist)  ${wl_status}"
         echo; printf_menu_option "b" "🔙 Назад"; print_separator "-" 60
 
         local choice; choice=$(safe_read "Твой выбор") || break

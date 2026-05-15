@@ -98,7 +98,22 @@ show_firewall_menu() {
                 wait_for_enter
                 ;;
             e|E)
-                if ! command -v ufw &> /dev/null; then err "UFW не установлен."; else info "Включаю UFW..."; echo "y" | run_cmd ufw enable; fi
+                if ! command -v ufw &>/dev/null; then err "UFW не установлен."
+                else
+                    info "Включаю UFW..."
+                    # Предупреждение если Docker запущен
+                    if command -v docker &>/dev/null && docker ps &>/dev/null 2>&1; then
+                        echo ""
+                        echo -e "  ${C_YELLOW}⚠️  ВНИМАНИЕ: Обнаружен Docker!${C_RESET}"
+                        echo -e "  UFW и Docker несовместимы без дополнительной настройки."
+                        echo -e "  После включения UFW Docker-контейнеры могут потерять доступ к сети."
+                        echo ""
+                        if ask_yes_no "Применить исправление UFW+Docker автоматически?" "y"; then
+                            _firewall_fix_docker_ufw
+                        fi
+                    fi
+                    echo "y" | run_cmd ufw enable
+                fi
                 ;;
             d|D)
                 if ! command -v ufw &> /dev/null; then err "UFW не установлен."; elif ask_yes_no "Вы уверены, что хотите отключить firewall?"; then
@@ -564,15 +579,93 @@ with open('/etc/ufw/before.rules', 'r') as f:
     content = f.read()
 content = re.sub(r'\n# --- НАЧАЛО: Reshala Anti-DDoS ---.*?# --- КОНЕЦ: Reshala Anti-DDoS ---\n', '', content, flags=re.DOTALL)
 # Also remove whitelist entries above it
-content = re.sub(r'\n# Whitelist: [^\n]+\n-A ufw-before-input -s [^\n]+ -j ACCEPT\n', '', content)
+content = re.sub(r'# Whitelist: [^\n]+\n-A ufw-before-input -s [^\n]+ -j ACCEPT\n', '', content)
 with open('/etc/ufw/before.rules', 'w') as f:
     f.write(content)
 PYEOF
 }
 
 # ============================================================ #
-#                   ЛОГИ И АНАЛИТИКА                           #
+#         UFW + DOCKER СОВМЕСТИМОСТЬ                           #
 # ============================================================ #
+
+# Применяет fix для корректной работы UFW совместно с Docker.
+# Без этого fix UFW блокирует входящий трафик к Docker-контейнерам,
+# даже если соответствующие порты открыты в UFW правилах.
+# Причина: Docker добавляет свои цепочки iptables ПОСЛЕ цепочек UFW.
+_firewall_fix_docker_ufw() {
+    print_separator
+    info "Применяю исправление UFW + Docker..."
+    print_separator
+
+    # 1. Разрешаем трафик из Docker-подсетей
+    run_cmd ufw allow from 172.16.0.0/12 comment 'Docker networks' 2>/dev/null || true
+    run_cmd ufw allow from 192.168.0.0/16 comment 'Docker bridge' 2>/dev/null || true
+    ok "Разрешены Docker-подсети (172.16.0.0/12, 192.168.0.0/16)"
+
+    # 2. Добавляем правила в /etc/ufw/after.rules для DOCKER-USER chain
+    # Эти правила выживают после ufw reset и не затрагиваются обычными правилами UFW
+    local after_rules="/etc/ufw/after.rules"
+    local marker_start="# --- НАЧАЛО: Reshala Docker UFW Fix ---"
+    local marker_end="# --- КОНЕЦ: Reshala Docker UFW Fix ---"
+
+    # Определяем имя основного интерфейса
+    local iface
+    iface=$(ip -o -4 route show to default 2>/dev/null | awk '{print $5}' | head -1)
+    iface=${iface:-eth0}
+
+    if [[ -f "$after_rules" ]] && grep -q "$marker_start" "$after_rules"; then
+        info "Блок Docker UFW Fix уже существует в after.rules. Обновляю..."
+        python3 - <<PYEOF
+import re
+with open('${after_rules}', 'r') as f:
+    content = f.read()
+content = re.sub(r'\n${marker_start}.*?${marker_end}\n', '', content, flags=re.DOTALL)
+with open('${after_rules}', 'w') as f:
+    f.write(content)
+PYEOF
+    fi
+
+    # Вставляем блок перед последним COMMIT в after.rules
+    python3 - "$after_rules" "$marker_start" "$marker_end" "$iface" <<'PYEOF'
+import sys
+rules_file, marker_s, marker_e, iface = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
+with open(rules_file, 'r') as f:
+    content = f.read()
+
+docker_block = f"""
+{marker_s}
+*filter
+:DOCKER-USER - [0:0]
+-A DOCKER-USER -i {iface} -p tcp --dport 80 -j ACCEPT
+-A DOCKER-USER -i {iface} -p tcp --dport 443 -j ACCEPT
+-A DOCKER-USER -j RETURN
+COMMIT
+{marker_e}
+"""
+
+# Вставляем перед последней строкой COMMIT
+if 'COMMIT' in content:
+    idx = content.rfind('COMMIT')
+    content = content[:idx] + docker_block + content[idx:]
+else:
+    content += docker_block
+
+with open(rules_file, 'w') as f:
+    f.write(content)
+print('OK')
+PYEOF
+
+    if [[ $? -eq 0 ]]; then
+        ok "Блок Docker UFW Fix добавлен в ${after_rules} (интерфейс: ${iface})"
+        run_cmd ufw reload 2>/dev/null || true
+        ok "UFW перезагружен. Docker-контейнеры должны быть доступны."
+    else
+        err "Не удалось добавить блок в after.rules. Добавьте вручную."
+        warn "Руководство: https://docs.docker.com/network/iptables/"
+    fi
+}
+
 
 _firewall_logs_analytics() {
     print_separator

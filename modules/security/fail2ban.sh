@@ -25,8 +25,23 @@ show_fail2ban_menu() {
         echo -e "  ${C_CYAN}╚══════════════════════════════════════════════════════════╝${C_RESET}"
         echo ""
 
+        echo -e "  ${C_WHITE}📈 МОНИТОРИНГ:${C_RESET}"
         _f2b_check_status
         
+        local wl_count=0
+        if [[ -f "$F2B_WHITELIST_FILE" ]]; then
+            wl_count=$(grep -v '^\s*#' "$F2B_WHITELIST_FILE" | grep -v '^\s*$' | wc -l)
+        fi
+        # Если локальный список Fail2Ban пуст, проверим Глобальный Белый Список
+        if [[ "$wl_count" -eq 0 ]] && command -v global_whitelist_count &>/dev/null; then
+            wl_count=$(global_whitelist_count)
+        fi
+        
+        local wl_status="${C_GRAY}[0]${C_RESET}"
+        if [[ "$wl_count" -gt 0 ]]; then 
+            wl_status="${C_GREEN}[✓ IP: ${wl_count}]${C_RESET}"
+        fi
+
         echo ""
         if ! command -v fail2ban-client &> /dev/null; then
             printf_menu_option "i" "УСТАНОВИТЬ FAIL2BAN" "${C_YELLOW}"
@@ -34,7 +49,7 @@ show_fail2ban_menu() {
             printf_menu_option "1" "Список забаненных IP"
             printf_menu_option "2" "Разбанить IP"
             printf_menu_option "3" "Забанить IP вручную"
-            printf_menu_option "4" "Whitelist (доверенные IP)"
+            printf_menu_option "4" "🛡️  Белый список (Whitelist)  ${wl_status}"
             printf_menu_option "5" "⚙️ Настройки (бан, доп. защита)"
             print_separator "-" 40
             printf_menu_option "6" "🔔 Уведомления Telegram"
@@ -102,45 +117,41 @@ _f2b_settings_menu() {
 }
 
 _f2b_check_status() {
-    print_separator
-    info "Статус Fail2Ban"
-
     if ! command -v fail2ban-client &> /dev/null; then
-        warn "Fail2Ban не установлен или не в PATH."
-        printf_description "Вы можете установить его, выбрав пункт 'i' в меню."
-        print_separator
+        echo -e "    ${C_YELLOW}⚠ Fail2Ban не обнаружен. Нажмите [i] для установки.${C_RESET}"
         return 1
     fi
-    
-    if systemctl is-active --quiet fail2ban 2>/dev/null; then
-        printf_description "Сервис: ${C_GREEN}Активен${C_RESET}"
+
+    if systemctl is-active --quiet fail2ban; then
+        local jails_list; jails_list=$(run_cmd fail2ban-client status 2>/dev/null | grep "Jail list:" | cut -d: -f2 | sed 's/,//g' | xargs)
+        local jails_count=$(echo "$jails_list" | wc -w)
         
-        local banned
-        banned=$(run_cmd fail2ban-client status sshd 2>/dev/null | grep "Currently banned" | awk '{print $4}')
-        local total
-        total=$(run_cmd fail2ban-client status sshd 2>/dev/null | grep "Total banned" | awk '{print $4}')
+        local bt; bt=$(get_config_var "F2B_BANTIME" "86400")
+        local bt_h; if [[ "$bt" == "-1" ]]; then bt_h="Навсегда"; elif [[ "$bt" -lt 3600 ]]; then bt_h="$((bt/60)) мин"; elif [[ "$bt" -lt 86400 ]]; then bt_h="$((bt/3600)) ч"; else bt_h="$((bt/86400)) дн"; fi
+
+        echo -e "    ${C_GREEN}●${C_RESET} ${C_WHITE}Состояние:${C_RESET} ${C_GREEN}Активен${C_RESET} ${C_GRAY}(Всего защит: ${jails_count})${C_RESET}"
+        
+        for jail in $jails_list; do
+            local banned; banned=$(run_cmd fail2ban-client status "$jail" 2>/dev/null | grep "Currently banned" | awk '{print $4}' || echo "0")
+            local total; total=$(run_cmd fail2ban-client status "$jail" 2>/dev/null | grep "Total banned" | awk '{print $4}' || echo "0")
             
-        printf_description "Защита SSH (sshd jail):"
-        printf_description "  - Сейчас забанено: ${C_CYAN}${banned:-0}${C_RESET}"
-        printf_description "  - Всего банов: ${C_CYAN}${total:-0}${C_RESET}"
+            local display_name="$jail"
+            case "$jail" in
+                sshd) display_name="Защита SSH" ;;
+                portscan-reshala) display_name="Порт-скан" ;;
+                nginx-auth-reshala) display_name="Nginx Auth" ;;
+                nginx-bots-reshala) display_name="Nginx Bots" ;;
+                nginx-scanners-reshala) display_name="Nginx Scan" ;;
+                custom-*) display_name="Кастом: ${jail#custom-}" ;;
+            esac
 
-        # Показываем время бана
-        local bantime
-        bantime=$(get_config_var "F2B_BANTIME" "86400") # Default to 24h
-        local bantime_human
-        if [[ "$bantime" == "-1" ]]; then
-            bantime_human="Навсегда"
-        elif [[ -z "$bantime" || "$bantime" -lt 3600 ]]; then
-            bantime_human="${bantime} сек"
-        else
-            bantime_human="$((bantime / 3600)) ч"
-        fi
-        printf_description "Время бана: ${C_CYAN}$bantime_human${C_RESET}"
-
+            echo -e "    ${C_GRAY}├──${C_RESET} ${C_WHITE}${display_name}:${C_RESET} ${C_RED}${banned}${C_RESET} ${C_GRAY}бан${C_RESET} / ${C_CYAN}${total}${C_RESET} ${C_GRAY}всего${C_RESET}"
+        done
+        
+        echo -e "    ${C_GRAY}└──${C_RESET} ${C_WHITE}Срок бана:${C_RESET}   ${C_YELLOW}${bt_h}${C_RESET}"
     else
-        printf_description "Сервис: ${C_RED}Не активен${C_RESET}"
+        echo -e "    ${C_RED}✖ СТАТУС: СЕРВИС ВЫКЛЮЧЕН${C_RESET}"
     fi
-    print_separator
 }
 
 _f2b_show_banned() {
@@ -209,20 +220,36 @@ _f2b_bantime_menu() {
     local current_human
     if [[ "$current_bantime" == "-1" ]]; then
         current_human="Навсегда"
-    elif [[ -z "$current_bantime" || "$current_bantime" -lt 3600 ]]; then
+    elif [[ -z "$current_bantime" ]]; then
+        current_human="Неизвестно"
+    elif [[ "$current_bantime" -lt 60 ]]; then
         current_human="${current_bantime} сек"
-    else
+    elif [[ "$current_bantime" -lt 3600 ]]; then
+        current_human="$((current_bantime / 60)) мин"
+    elif [[ "$current_bantime" -lt 86400 ]]; then
         current_human="$((current_bantime / 3600)) ч"
+    else
+        current_human="$((current_bantime / 86400)) дней"
     fi
     printf_description "Текущее время бана: ${C_CYAN}$current_human${C_RESET}"
     echo ""
 
-    local bantime_options=("1 час" "24 часа" "7 дней" "Навсегда")
-    local bantime_values=("3600" "86400" "604800" "-1")
+    local bantime_options=("1 час" "24 часа" "7 дней" "Навсегда" "⏱️ Указать вручную (в минутах)")
+    local bantime_values=("3600" "86400" "604800" "-1" "custom")
     
     local bantime_choice
     bantime_choice=$(ask_selection "Выберите новое время бана:" "${bantime_options[@]}") || return
     local new_bantime=${bantime_values[$((bantime_choice-1))]}
+
+    if [[ "$new_bantime" == "custom" ]]; then
+        local custom_mins
+        custom_mins=$(safe_read "Введите время бана в минутах (например, 10)") || return
+        if [[ ! "$custom_mins" =~ ^[0-9]+$ ]] || [[ "$custom_mins" -lt 1 ]]; then
+            err "Ошибка: нужно ввести положительное число."
+            return
+        fi
+        new_bantime=$((custom_mins * 60))
+    fi
 
     if [[ "$current_bantime" == "$new_bantime" ]]; then
         info "Время бана не изменилось."
@@ -260,13 +287,28 @@ _f2b_update_ignoreip() {
 }
 
 _f2b_whitelist_menu() {
-    # Предлагаем Глобальный Белый Список
-    if command -v global_whitelist_offer &>/dev/null; then
-        if global_whitelist_offer "Fail2Ban"; then
-            info "Fail2Ban будет использовать Глобальный Белый Список."
-            global_whitelist_sync_all 2>/dev/null || true
-            wait_for_enter
-            return
+    # 1. Проверяем синхронизацию с Глобальным Белым Списком
+    local global_file="/etc/reshala/global-whitelist.txt"
+    if [[ -f "$global_file" ]]; then
+        local is_synced=false
+        if [[ -f "$F2B_WHITELIST_FILE" ]]; then
+            local local_sum; local_sum=$(grep -v '^\s*#' "$F2B_WHITELIST_FILE" | grep -v '^\s*$' | sort | md5sum | awk '{print $1}')
+            local global_sum; global_sum=$(grep -v '^\s*#' "$global_file" | grep -v '^\s*$' | sort | md5sum | awk '{print $1}')
+            [[ "$local_sum" == "$global_sum" ]] && is_synced=true
+        fi
+
+        if [[ "$is_synced" == "true" ]]; then
+            echo -e "  ${C_GREEN}✓ Текущий список синхронизирован с Глобальным Белым Списком.${C_RESET}"
+            echo -e "  ${C_GRAY}Изменения в Глобальном списке будут автоматически применяться здесь.${C_RESET}"
+            echo ""
+        else
+            if global_whitelist_offer "Fail2Ban"; then
+                info "Копирую IP из Глобального Белого Списка в Fail2Ban..."
+                run_cmd cp -f "$global_file" "$F2B_WHITELIST_FILE" 2>/dev/null || true
+                _f2b_update_ignoreip
+                wait_for_enter
+                return
+            fi
         fi
     fi
 
@@ -342,44 +384,7 @@ _f2b_whitelist_menu() {
     done
 }
 
-_f2b_manage_jail() {
-    local jail_name="$1"
-    local filter_content="$2"
-    local jail_content="$3"
 
-    local is_enabled="false"
-    if grep -q "^\s*\[$jail_name\]" /etc/fail2ban/jail.local 2>/dev/null && grep -A 3 "^\s*\[$jail_name\]" /etc/fail2ban/jail.local 2>/dev/null | grep -q "enabled\s*=\s*true"; then
-        is_enabled="true"
-    fi
-
-    if [[ "$is_enabled" == "true" ]]; then
-        if ask_yes_no "Защита '$jail_name' включена. Выключить?"; then
-            run_cmd sed -i "/^\[$jail_name\]/,/^\s*\[/ s/enabled\s*=\s*true/enabled = false/" /etc/fail2ban/jail.local
-            ok "Защита '$jail_name' выключена."
-            run_cmd systemctl reload fail2ban
-        fi
-    else
-        if ask_yes_no "Защита '$jail_name' выключена. Включить?"; then
-            # Шаг 1: Создаем фильтр, если его нет
-            local filter_file="/etc/fail2ban/filter.d/${jail_name}.conf"
-            if [[ ! -f "$filter_file" ]]; then
-                info "Создаю файл фильтра: $filter_file"
-                echo -e "$filter_content" | run_cmd tee "$filter_file" > /dev/null
-            fi
-            
-            # Шаг 2: Добавляем секцию в jail.local, если ее нет
-            if ! grep -q "^\s*\[$jail_name\]" /etc/fail2ban/jail.local 2>/dev/null; then
-                info "Добавляю секцию [$jail_name] в jail.local..."
-                echo -e "\n$jail_content" | run_cmd tee -a /etc/fail2ban/jail.local > /dev/null
-            fi
-
-            # Шаг 3: Включаем защиту
-            run_cmd sed -i "/^\[$jail_name\]/,/^\s*\[/ s/enabled\s*=\s*false/enabled = true/" /etc/fail2ban/jail.local
-            ok "Защита '$jail_name' включена."
-            run_cmd systemctl reload fail2ban
-        fi
-    fi
-}
 
 _f2b_notifications_menu() {
     menu_header "🔔 Уведомления Telegram"
@@ -405,30 +410,64 @@ _f2b_extended_menu() {
         fi
 
         # Check statuses
+        local sshd_status="(${C_RED}выкл${C_RESET})"
+        grep -A 2 "\[sshd\]" /etc/fail2ban/jail.local 2>/dev/null | grep -q "enabled\s*=\s*true" && \
+            sshd_status="(${C_GREEN}вкл${C_RESET})"
+
         local portscan_status="(${C_RED}выкл${C_RESET})"
-        grep -A 2 "\[portscan-reshala\]" /etc/fail2ban/jail.local 2>/dev/null | grep -q "enabled = true" && \
+        grep -A 2 "\[portscan-reshala\]" /etc/fail2ban/jail.local 2>/dev/null | grep -q "enabled\s*=\s*true" && \
             portscan_status="(${C_GREEN}вкл${C_RESET})"
         
         local nginx_auth_status="(${C_RED}выкл${C_RESET})"
-        grep -A 2 "\[nginx-auth-reshala\]" /etc/fail2ban/jail.local 2>/dev/null | grep -q "enabled = true" && \
+        grep -A 2 "\[nginx-auth-reshala\]" /etc/fail2ban/jail.local 2>/dev/null | grep -q "enabled\s*=\s*true" && \
             nginx_auth_status="(${C_GREEN}вкл${C_RESET})"
         
         local nginx_bots_status="(${C_RED}выкл${C_RESET})"
-        grep -A 2 "\[nginx-bots-reshala\]" /etc/fail2ban/jail.local 2>/dev/null | grep -q "enabled = true" && \
+        grep -A 2 "\[nginx-bots-reshala\]" /etc/fail2ban/jail.local 2>/dev/null | grep -q "enabled\s*=\s*true" && \
             nginx_bots_status="(${C_GREEN}вкл${C_RESET})"
 
         local nginx_scanners_status="(${C_RED}выкл${C_RESET})"
-        grep -A 2 "\[nginx-scanners-reshala\]" /etc/fail2ban/jail.local 2>/dev/null | grep -q "enabled = true" && \
+        grep -A 2 "\[nginx-scanners-reshala\]" /etc/fail2ban/jail.local 2>/dev/null | grep -q "enabled\s*=\s*true" && \
             nginx_scanners_status="(${C_GREEN}вкл${C_RESET})"
 
         echo ""
+        printf_menu_option "0" "Защита SSH (стандартная) $sshd_status"
         printf_menu_option "1" "Защита от сканирования портов $portscan_status"
         printf_menu_option "2" "Защита от брутфорса Nginx (HTTP auth) $nginx_auth_status"
         printf_menu_option "3" "Блокировка вредоносных ботов Nginx $nginx_bots_status"
         printf_menu_option "4" "Защита Nginx от сканеров (auto-detect) $nginx_scanners_status"
+        
+        # Scan for custom jails
+        local custom_jails=()
+        if ls /etc/fail2ban/filter.d/custom-*.conf 1> /dev/null 2>&1; then
+            for conf_file in /etc/fail2ban/filter.d/custom-*.conf; do
+                local j_name
+                j_name=$(basename "$conf_file" .conf)
+                custom_jails+=("$j_name")
+            done
+        fi
+        
+        if [[ ${#custom_jails[@]} -gt 0 ]]; then
+            echo ""
+            info "Пользовательские правила (Кастомные Jails):"
+            local idx=5
+            for j in "${custom_jails[@]}"; do
+                local c_status="(${C_RED}выкл${C_RESET})"
+                grep -A 2 "\[$j\]" /etc/fail2ban/jail.local 2>/dev/null | grep -q "enabled\s*=\s*true" && \
+                    c_status="(${C_GREEN}вкл${C_RESET})"
+                printf_menu_option "$idx" "${C_YELLOW}${j}${C_RESET} $c_status"
+                ((idx++))
+            done
+        fi
+
         echo ""
-        printf_menu_option "a" "Включить все"
-        printf_menu_option "d" "Выключить все"
+        printf_menu_option "c" "➕ Создать свой Jail (Кастомная защита)"
+        if [[ ${#custom_jails[@]} -gt 0 ]]; then
+            printf_menu_option "r" "🗑️ Удалить кастомный Jail"
+        fi
+        echo ""
+        printf_menu_option "a" "Включить все встроенные"
+        printf_menu_option "d" "Выключить все встроенные"
         echo ""
         printf_menu_option "b" "Назад"
         echo ""
@@ -437,26 +476,107 @@ _f2b_extended_menu() {
         choice=$(safe_read "Выберите действие") || { break; }
 
         case "$choice" in
-            1) _f2b_toggle_jail "portscan-reshala" && run_cmd systemctl reload fail2ban ;;
-            2) _f2b_toggle_jail "nginx-auth-reshala" && run_cmd systemctl reload fail2ban ;;
-            3) _f2b_toggle_jail "nginx-bots-reshala" && run_cmd systemctl reload fail2ban ;;
-            4) _f2b_setup_nginx_scanners; wait_for_enter ;;
+            0)
+                local ssh_port; ssh_port=$(grep "^Port " /etc/ssh/sshd_config 2>/dev/null | awk '{print $2}')
+                ssh_port=${ssh_port:-22}
+                # Для SSH мы не передаем фильтр (f), так как он стандартный в системе
+                _f2b_jail_submenu "sshd" "syslog" "" "$ssh_port" "ufw[name=sshd, port=any, protocol=tcp]" "Стандартная защита SSH-доступа."
+                ;;
+            1) 
+                local f="[Definition]\nfailregex = .*\[UFW BLOCK\] IN=.* SRC=<HOST> .*\nignoreregex ="
+                _f2b_jail_submenu "portscan-reshala" "syslog" "$f" "any" "ufw[name=portscan, port=any, protocol=tcp]" "Защита от сканирования портов на основе логов UFW."
+                ;;
+            2) 
+                local f="[Definition]\nfailregex = ^ \[error\] \d+#\d+: \*\d+ user \"\S+\":? (password mismatch|was not found in).*, client: <HOST>, server: \S+, request: \"\S+ \S+ HTTP/\d+\.\d+\", host: \"\S+\"\nignoreregex ="
+                _f2b_jail_submenu "nginx-auth-reshala" "nginx-error" "$f" "any" "ufw[name=nginx-auth, port=any, protocol=tcp]" "Защита от подбора паролей HTTP Basic Auth в Nginx."
+                ;;
+            3) 
+                local f="[Definition]\nfailregex = ^<HOST> -.*\"(GET|POST|HEAD).*HTTP.*\"(?:-|.*)\" \"(?:.*)(?:[A-Za-z0-9](?:ndroid|pache|oard|rowser|rawler|curl|iscovery|ownload|ot|enesis|ttp|ndex|ava|raw|ider|rchive|earch|eek|lurp|urvey|ycobot|get|ython|ruby|rust|un|eb|get|ync|pider|can|lurp).*)\"$\nignoreregex ="
+                _f2b_jail_submenu "nginx-bots-reshala" "nginx-access" "$f" "any" "ufw[name=nginx-bots, port=any, protocol=tcp]" "Блокировка подозрительных ботов и парсеров в Nginx."
+                ;;
+            4) 
+                local f="[Definition]\nfailregex = ^<HOST> .* \"(GET|POST|HEAD) .*(\\.php|\\.env|\\.git|\\.asp|wp-login|wp-admin|cgi-bin|/admin|/config|/setup|\\.sql|shell|eval|passwd|\\.bak).*\" (400|403|404|444)\n            ^<HOST> .* \"(GET|POST) .*(xmlrpc|wp-cron|wp-json/wp/v2/users).*\" (403|404)\nignoreregex ="
+                _f2b_jail_submenu "nginx-scanners-reshala" "nginx-access" "$f" "any" "ufw[name=nginx-scanners, port=any, protocol=tcp]" "Защита от сканирования уязвимостей и админок (404/403 ошибки)."
+                ;;
+            c|C)
+                local custom_name
+                custom_name=$(ask_non_empty "Введите имя (только англ. буквы, например: myapp)") || continue
+                custom_name=$(echo "$custom_name" | tr -cd 'a-zA-Z0-9_-')
+                if [[ -z "$custom_name" ]]; then
+                    err "Имя не может быть пустым."
+                    continue
+                fi
+                local jail_name="custom-${custom_name}"
+                
+                if [[ ! -f "/etc/fail2ban/filter.d/${jail_name}.conf" ]]; then
+                    info "Создаю шаблон фильтра для ${jail_name}..."
+                    run_cmd tee "/etc/fail2ban/filter.d/${jail_name}.conf" > /dev/null <<EOF
+[Definition]
+# Укажите регулярное выражение для поиска IP-адреса нарушителя.
+# <HOST> - это специальный тег Fail2Ban, который захватывает IP.
+failregex = ^<HOST> .* ".*"
+ignoreregex =
+EOF
+                    ok "Создан: /etc/fail2ban/filter.d/${jail_name}.conf"
+                fi
+                
+                # Открываем подменю для нового джейла!
+                # Передаем пустое f, так как файл фильтра мы только что создали.
+                _f2b_jail_submenu "$jail_name" "syslog" "" "any" "ufw[name=$jail_name, port=any, protocol=tcp]" "Кастомная защита: $jail_name"
+                ;;
+            r|R)
+                if [[ ${#custom_jails[@]} -eq 0 ]]; then
+                    warn "Нет кастомных защит для удаления."
+                    continue
+                fi
+                echo ""
+                info "Выберите Jail для удаления:"
+                local i=1
+                for j in "${custom_jails[@]}"; do
+                    printf_menu_option "$i" "${C_YELLOW}${j}${C_RESET}"
+                    ((i++))
+                done
+                local rm_choice
+                rm_choice=$(safe_read "Номер") || continue
+                if [[ "$rm_choice" =~ ^[0-9]+$ ]] && [[ "$rm_choice" -ge 1 ]] && [[ "$rm_choice" -le ${#custom_jails[@]} ]]; then
+                    local jail_to_rm="${custom_jails[$((rm_choice-1))]}"
+                    if ask_yes_no "Удалить $jail_to_rm (фильтр и конфиг)?"; then
+                        run_cmd sed -i "/^\[$jail_to_rm\]/,/^\s*\[/d" /etc/fail2ban/jail.local 2>/dev/null
+                        run_cmd rm -f "/etc/fail2ban/filter.d/${jail_to_rm}.conf"
+                        run_cmd systemctl reload fail2ban 2>/dev/null
+                        ok "Удалено."
+                    fi
+                else
+                    err "Неверный выбор."
+                fi
+                ;;
             a|A)
-                info "Включаю все расширенные защиты..."
-                _f2b_toggle_jail "portscan-reshala" "true"
-                _f2b_toggle_jail "nginx-auth-reshala" "true"
-                _f2b_toggle_jail "nginx-bots-reshala" "true"
-                run_cmd systemctl reload fail2ban
+                info "Автоматическое включение требует ручного выбора логов для каждого. Используйте пункты 1-4."
+                wait_for_enter
                 ;;
             d|D)
-                info "Выключаю все расширенные защиты..."
-                _f2b_toggle_jail "portscan-reshala" "false"
-                _f2b_toggle_jail "nginx-auth-reshala" "false"
-                _f2b_toggle_jail "nginx-bots-reshala" "false"
-                run_cmd systemctl reload fail2ban
+                info "Выключаю все встроенные защиты..."
+                run_cmd sed -i "/^\[portscan-reshala\]/,/^\s*\[/ s/enabled\s*=\s*true/enabled = false/" /etc/fail2ban/jail.local 2>/dev/null
+                run_cmd sed -i "/^\[nginx-auth-reshala\]/,/^\s*\[/ s/enabled\s*=\s*true/enabled = false/" /etc/fail2ban/jail.local 2>/dev/null
+                run_cmd sed -i "/^\[nginx-bots-reshala\]/,/^\s*\[/ s/enabled\s*=\s*true/enabled = false/" /etc/fail2ban/jail.local 2>/dev/null
+                run_cmd sed -i "/^\[nginx-scanners-reshala\]/,/^\s*\[/ s/enabled\s*=\s*true/enabled = false/" /etc/fail2ban/jail.local 2>/dev/null
+                run_cmd systemctl reload fail2ban 2>/dev/null
                 ;;
             b|B) break ;;
-            *) warn "Неверный выбор" ;;
+            *)
+                # Проверяем, не выбрал ли пользователь кастомный jail
+                if [[ "$choice" =~ ^[0-9]+$ ]] && [[ "$choice" -ge 5 ]]; then
+                    local custom_idx=$((choice - 5))
+                    if [[ "$custom_idx" -lt ${#custom_jails[@]} ]]; then
+                        local selected_custom="${custom_jails[$custom_idx]}"
+                        _f2b_jail_submenu "$selected_custom" "syslog" "" "any" "ufw[name=$selected_custom, port=any, protocol=tcp]" "Кастомная защита: $selected_custom"
+                    else
+                        warn "Неверный выбор"
+                    fi
+                else
+                    warn "Неверный выбор"
+                fi
+                ;;
         esac
         disable_graceful_ctrlc
     done
@@ -548,9 +668,10 @@ ignoreip = $ignoreip
 
 [sshd]
 enabled = true
-port = $ssh_port
+port = any
 filter = sshd
 logpath = /var/log/auth.log
+action = ufw[name=sshd, port=any, protocol=tcp]
 JAIL
 
     ok "Файл jail.local создан."
@@ -571,19 +692,10 @@ JAIL
     fi
 }
 
-# --- Nginx Scanners Jail с автопоиском логов ---
-_f2b_setup_nginx_scanners() {
-    print_separator
-    info "Защита Nginx от сканеров (nginx-scanners)"
-    print_separator
-
-    if [[ ! -f "/etc/fail2ban/jail.local" ]]; then
-        err "Fail2Ban не настроен. Сначала установите его."
-        return
-    fi
-
-    # Автопоиск файлов логов nginx
-    info "Автопоиск файлов логов Nginx..."
+# --- Логика автопоиска логов ---
+_f2b_detect_nginx_log() {
+    local log_type="$1" # "access" or "error"
+    F2B_SELECTED_LOG=""
     local found_logs=()
 
     # Стандартные пути
@@ -594,7 +706,9 @@ _f2b_setup_nginx_scanners() {
         "/var/log/nginx/error_stream.log"
     )
     for p in "${standard_paths[@]}"; do
-        [[ -f "$p" ]] && found_logs+=("$p")
+        if [[ -f "$p" ]] && [[ "$p" == *"$log_type"* ]]; then
+            found_logs+=("$p")
+        fi
     done
 
     # Docker volumes
@@ -602,18 +716,25 @@ _f2b_setup_nginx_scanners() {
     if command -v docker &>/dev/null; then
         mapfile -t docker_paths < <(docker inspect --format '{{range .Mounts}}{{if eq .Type "bind"}}{{.Source}}{{"\n"}}{{end}}{{end}}' $(docker ps -q) 2>/dev/null | grep -i "log\|nginx" | sort -u)
         for dp in "${docker_paths[@]}"; do
-            [[ -d "$dp" ]] && mapfile -t -O ${#found_logs[@]} found_logs < <(find "$dp" -name "*access*" -o -name "*error*" 2>/dev/null | head -5)
+            if [[ -d "$dp" ]]; then
+                mapfile -t -O ${#found_logs[@]} found_logs < <(find "$dp" -name "*${log_type}*" 2>/dev/null | head -5)
+            fi
         done
     fi
 
     # Дополнительный поиск
     if [[ ${#found_logs[@]} -eq 0 ]]; then
-        mapfile -t found_logs < <(find /var/log /opt /home -name "*nginx*access*" -o -name "*nginx*error*" 2>/dev/null | head -10)
+        mapfile -t found_logs < <(find /var/log /opt /home -name "*nginx*${log_type}*" 2>/dev/null | head -10)
     fi
 
-    local selected_log=""
     if [[ ${#found_logs[@]} -gt 0 ]]; then
-        ok "Найдены файлы логов Nginx (${#found_logs[@]}):"
+        info "Подсказка по выбору лог-файла:"
+        printf_description " • Если Nginx работает на сервере: ${C_YELLOW}/var/log/nginx/${log_type}.log${C_RESET}"
+        printf_description " • Если Nginx в Docker (например, NPM): ищите пути вида ${C_YELLOW}/opt/.../data/logs/${C_RESET} или ${C_YELLOW}/var/lib/docker/volumes/...${C_RESET}"
+        printf_description " Важно: Fail2Ban работает на хосте, поэтому путь должен быть доступен с хост-системы!"
+        echo ""
+
+        ok "Найдены подходящие логи Nginx (${#found_logs[@]}):"
         local i=1
         for log_file in "${found_logs[@]}"; do
             local size
@@ -626,63 +747,272 @@ _f2b_setup_nginx_scanners() {
         echo ""
 
         local choice
-        choice=$(safe_read "Выберите файл лога" "1") || return
+        choice=$(safe_read "Выберите файл лога" "1") || return 1
 
         if [[ "$choice" == "m" || "$choice" == "M" ]]; then
-            selected_log=$(ask_non_empty "Введите полный путь к файлу лога") || return
+            F2B_SELECTED_LOG=$(ask_non_empty "Введите полный путь к файлу лога") || return 1
         elif [[ "$choice" =~ ^[0-9]+$ ]] && [[ "$choice" -ge 1 ]] && [[ "$choice" -le ${#found_logs[@]} ]]; then
-            selected_log="${found_logs[$((choice-1))]}"
+            F2B_SELECTED_LOG="${found_logs[$((choice-1))]}"
         else
             err "Неверный выбор."
-            return
+            return 1
         fi
     else
-        warn "Файлы логов Nginx не найдены автоматически."
-        selected_log=$(ask_non_empty "Введите полный путь к access.log") || return
+        warn "Логи Nginx не найдены автоматически."
+        F2B_SELECTED_LOG=$(ask_non_empty "Введите полный путь к $log_type.log") || return 1
     fi
+}
 
-    if [[ ! -f "$selected_log" ]]; then
-        err "Файл ${selected_log} не существует."
-        return
-    fi
+_f2b_detect_syslog() {
+    F2B_SELECTED_LOG=""
+    local found_logs=()
+    if [[ -f "/var/log/syslog" ]]; then found_logs+=("/var/log/syslog"); fi
+    if [[ -f "/var/log/messages" ]]; then found_logs+=("/var/log/messages"); fi
+    if [[ -f "/var/log/auth.log" ]]; then found_logs+=("/var/log/auth.log"); fi
 
-    ok "Выбран файл: ${C_CYAN}${selected_log}${C_RESET}"
+    if [[ ${#found_logs[@]} -gt 0 ]]; then
+        info "Подсказка по выбору системного лог-файла:"
+        printf_description " • В Ubuntu/Debian используется ${C_YELLOW}/var/log/syslog${C_RESET} или ${C_YELLOW}/var/log/auth.log${C_RESET}"
+        printf_description " • В CentOS/RHEL/Alma используется ${C_YELLOW}/var/log/messages${C_RESET} или ${C_YELLOW}/var/log/secure${C_RESET}"
+        echo ""
 
-    # Создаём фильтр
-    info "Создаю фильтр для nginx-scanners..."
-    cat <<'FILTER' | run_cmd tee /etc/fail2ban/filter.d/nginx-scanners-reshala.conf > /dev/null
-[Definition]
-failregex = ^<HOST> .* "(GET|POST|HEAD) .*(\.php|\.env|\.git|\.asp|wp-login|wp-admin|cgi-bin|/admin|/config|/setup|\.sql|shell|eval|passwd|\.bak).*" (400|403|404|444)
-            ^<HOST> .* "(GET|POST) .*(xmlrpc|wp-cron|wp-json/wp/v2/users).*" (403|404)
-ignoreregex =
-FILTER
+        ok "Найдены системные логи (${#found_logs[@]}):"
+        local i=1
+        for log_file in "${found_logs[@]}"; do
+            local size
+            size=$(du -h "$log_file" 2>/dev/null | awk '{print $1}')
+            printf_description "  ${C_WHITE}${i})${C_RESET} ${log_file} ${C_GRAY}(${size:-?})${C_RESET}"
+            ((i++))
+        done
+        echo ""
+        printf_menu_option "m" "Ввести путь вручную"
+        echo ""
 
-    # Добавляем/обновляем jail
-    if grep -q "\[nginx-scanners-reshala\]" /etc/fail2ban/jail.local 2>/dev/null; then
-        # Обновляем существующий
-        run_cmd sed -i "/\[nginx-scanners-reshala\]/,/^\[/{
-            s|^logpath.*|logpath = ${selected_log}|
-            s|^enabled.*|enabled = true|
-        }" /etc/fail2ban/jail.local
-        ok "Jail nginx-scanners-reshala обновлён."
+        local choice
+        choice=$(safe_read "Выберите файл лога" "1") || return 1
+
+        if [[ "$choice" == "m" || "$choice" == "M" ]]; then
+            F2B_SELECTED_LOG=$(ask_non_empty "Введите полный путь к файлу системного лога") || return 1
+        elif [[ "$choice" =~ ^[0-9]+$ ]] && [[ "$choice" -ge 1 ]] && [[ "$choice" -le ${#found_logs[@]} ]]; then
+            F2B_SELECTED_LOG="${found_logs[$((choice-1))]}"
+        else
+            err "Неверный выбор."
+            return 1
+        fi
     else
-        # Добавляем новый
-        cat <<JAIL | run_cmd tee -a /etc/fail2ban/jail.local > /dev/null
+        warn "Системные логи не найдены."
+        F2B_SELECTED_LOG=$(ask_non_empty "Введите полный путь к системному логу") || return 1
+    fi
+}
 
-[nginx-scanners-reshala]
+_f2b_jail_submenu() {
+    local jail_name="$1"
+    local log_type="$2"
+    local default_filter="$3"
+    local default_port="$4"
+    local default_action="$5"
+    local menu_title="$6"
+
+    local current_p="$default_port"
+    local current_a="$default_action"
+
+    while true; do
+        clear
+        enable_graceful_ctrlc
+        menu_header "🛡️ Управление Jail: $jail_name"
+        printf_description "$menu_title"
+        print_separator
+
+        local is_enabled="false"
+        local current_log="Не задан"
+        local current_maxretry="3"
+        local filter_file="/etc/fail2ban/filter.d/${jail_name}.conf"
+
+        if grep -q "^\s*\[$jail_name\]" /etc/fail2ban/jail.local 2>/dev/null; then
+            if grep -A 10 "^\s*\[$jail_name\]" /etc/fail2ban/jail.local 2>/dev/null | grep -q "enabled\s*=\s*true"; then
+                is_enabled="true"
+            fi
+            local extracted_log
+            extracted_log=$(grep -A 10 "^\s*\[$jail_name\]" /etc/fail2ban/jail.local 2>/dev/null | grep "^\s*logpath\s*=" | head -1 | awk -F'=' '{print $2}' | xargs)
+            [[ -n "$extracted_log" ]] && current_log="$extracted_log"
+            
+            local extracted_max
+            extracted_max=$(grep -A 10 "^\s*\[$jail_name\]" /etc/fail2ban/jail.local 2>/dev/null | grep "^\s*maxretry\s*=" | head -1 | awk -F'=' '{print $2}' | xargs)
+            [[ -n "$extracted_max" ]] && current_maxretry="$extracted_max"
+
+            local extracted_p
+            extracted_p=$(grep -A 10 "^\s*\[$jail_name\]" /etc/fail2ban/jail.local 2>/dev/null | grep "^\s*port\s*=" | head -1 | awk -F'=' '{print $2}' | xargs)
+            [[ -n "$extracted_p" ]] && current_p="$extracted_p"
+
+            local extracted_a
+            extracted_a=$(grep -A 15 "^\s*\[$jail_name\]" /etc/fail2ban/jail.local 2>/dev/null | grep "^\s*action\s*=" | head -1 | awk -F'=' '{print $2}' | xargs)
+            [[ -n "$extracted_a" ]] && current_a="$extracted_a"
+        fi
+
+        local current_action_desc="Полная изоляция (все порты)"
+        if [[ -n "$current_a" ]]; then
+            if [[ "$current_a" != *"port=any"* ]]; then
+                local act_port; act_port=$(echo "$current_a" | grep -o "port=[^,]*" | cut -d= -f2)
+                current_action_desc="Только сервис (порт ${act_port:-?})"
+            fi
+        fi
+
+        if [[ "$is_enabled" == "true" ]]; then
+            printf_description "Статус: ${C_GREEN}Включен${C_RESET}"
+        else
+            printf_description "Статус: ${C_RED}Выключен${C_RESET}"
+        fi
+        printf_description "Файл лога: ${C_CYAN}$current_log${C_RESET}"
+        printf_description "Попыток (maxretry): ${C_CYAN}$current_maxretry${C_RESET}"
+        printf_description "Метод блокировки: ${C_CYAN}$current_action_desc${C_RESET}"
+        
+        echo ""
+        if [[ "$is_enabled" == "true" ]]; then
+            printf_menu_option "1" "🔴 Выключить защиту"
+        else
+            printf_menu_option "1" "🟢 Включить защиту"
+        fi
+        printf_menu_option "2" "📝 Изменить количество попыток (maxretry)"
+        printf_menu_option "3" "📂 Изменить путь к лог-файлу"
+        printf_menu_option "4" "👁️ Просмотреть/Отредактировать правила (Regex)"
+        printf_menu_option "5" "🛡️ Изменить метод блокировки"
+        echo ""
+        printf_menu_option "b" "Назад"
+        echo ""
+
+        local choice
+        choice=$(safe_read "Выберите действие") || { break; }
+
+        case "$choice" in
+            1)
+                if [[ "$is_enabled" == "true" ]]; then
+                    run_cmd sed -i "/^\[$jail_name\]/,/^\s*\[/ s/enabled\s*=\s*true/enabled = false/" /etc/fail2ban/jail.local
+                    ok "Защита '$jail_name' выключена."
+                    run_cmd systemctl reload fail2ban 2>/dev/null || run_cmd systemctl restart fail2ban
+                else
+                    if [[ "$current_log" == "Не задан" ]]; then
+                        warn "Сначала необходимо выбрать лог-файл (опция 3)."
+                        wait_for_enter
+                        continue
+                    fi
+                    if [[ ! -f "$filter_file" ]]; then
+                        info "Создаю стандартный файл фильтра..."
+                        echo -e "$default_filter" | run_cmd tee "$filter_file" > /dev/null
+                    fi
+                    if ! grep -q "^\s*\[$jail_name\]" /etc/fail2ban/jail.local 2>/dev/null; then
+                        info "Добавляю секцию в jail.local..."
+                        cat <<JAIL | run_cmd tee -a /etc/fail2ban/jail.local > /dev/null
+
+[$jail_name]
 enabled = true
-port = http,https
-filter = nginx-scanners-reshala
-logpath = ${selected_log}
-maxretry = 3
+port = $current_p
+filter = $jail_name
+logpath = $current_log
+maxretry = $current_maxretry
 findtime = 600
 bantime = 86400
-action = ufw[name=nginx-scanners, port=http, protocol=tcp]
+action = $current_a
 JAIL
-        ok "Jail nginx-scanners-reshala создан."
-    fi
-
-    run_cmd systemctl reload fail2ban 2>/dev/null || run_cmd systemctl restart fail2ban
-    ok "Nginx Scanners защита активирована! Логфайл: ${C_CYAN}${selected_log}${C_RESET}"
+                    else
+                        run_cmd sed -i "/^\[$jail_name\]/,/^\s*\[/ s/enabled\s*=\s*false/enabled = true/" /etc/fail2ban/jail.local
+                    fi
+                    ok "Защита '$jail_name' включена."
+                    run_cmd systemctl reload fail2ban 2>/dev/null || run_cmd systemctl restart fail2ban
+                fi
+                wait_for_enter
+                ;;
+            2)
+                local new_maxretry
+                new_maxretry=$(safe_read "Введите новое количество попыток (текущее: $current_maxretry)" "$current_maxretry") || continue
+                if [[ "$new_maxretry" =~ ^[0-9]+$ ]]; then
+                    if grep -q "^\s*\[$jail_name\]" /etc/fail2ban/jail.local 2>/dev/null; then
+                        if grep -A 10 "^\s*\[$jail_name\]" /etc/fail2ban/jail.local | grep -q "^\s*maxretry\s*="; then
+                            run_cmd sed -i "/^\[$jail_name\]/,/^\s*\[/ s/^\s*maxretry\s*=.*/maxretry = $new_maxretry/" /etc/fail2ban/jail.local
+                        else
+                            run_cmd sed -i "/^\[$jail_name\]/a maxretry = $new_maxretry" /etc/fail2ban/jail.local
+                        fi
+                        ok "maxretry обновлен до $new_maxretry"
+                        [[ "$is_enabled" == "true" ]] && run_cmd systemctl reload fail2ban
+                    else
+                        warn "Сначала включите защиту, чтобы конфигурация была создана."
+                    fi
+                else
+                    err "Должно быть числом."
+                fi
+                wait_for_enter
+                ;;
+            3)
+                if [[ "$log_type" == "nginx-access" ]]; then
+                    _f2b_detect_nginx_log "access"
+                elif [[ "$log_type" == "nginx-error" ]]; then
+                    _f2b_detect_nginx_log "error"
+                elif [[ "$log_type" == "syslog" ]]; then
+                    _f2b_detect_syslog
+                else
+                    F2B_SELECTED_LOG=$(ask_non_empty "Введите путь к логу") || continue
+                fi
+                
+                if [[ -n "$F2B_SELECTED_LOG" ]] && [[ -f "$F2B_SELECTED_LOG" ]]; then
+                    if grep -q "^\s*\[$jail_name\]" /etc/fail2ban/jail.local 2>/dev/null; then
+                        run_cmd sed -i "/^\[$jail_name\]/,/^\s*\[/ s|^logpath.*|logpath = ${F2B_SELECTED_LOG}|" /etc/fail2ban/jail.local
+                        ok "Лог обновлен."
+                        [[ "$is_enabled" == "true" ]] && run_cmd systemctl reload fail2ban
+                    else
+                        # Store in temp var until enabled
+                        current_log="$F2B_SELECTED_LOG"
+                        ok "Лог выбран. Включите защиту для применения."
+                    fi
+                fi
+                wait_for_enter
+                ;;
+            4)
+                if [[ ! -f "$filter_file" ]]; then
+                    info "Создаю стандартный файл фильтра..."
+                    echo -e "$default_filter" | run_cmd tee "$filter_file" > /dev/null
+                fi
+                run_cmd nano "$filter_file"
+                ok "Если вы внесли изменения, они будут применены."
+                [[ "$is_enabled" == "true" ]] && run_cmd systemctl reload fail2ban 2>/dev/null
+                ;;
+            5)
+                echo -e "\n  ${C_CYAN}Выберите метод блокировки:${C_RESET}"
+                echo -e "  1. ${C_GREEN}Полная изоляция${C_RESET} (Блокировать все порты - РЕКОМЕНДУЕТСЯ)"
+                echo -e "  2. ${C_YELLOW}Ограниченная блокировка${C_RESET} (Только порты этого сервиса)"
+                echo ""
+                local m_choice
+                m_choice=$(safe_read "Выбор" "1") || continue
+                
+                local new_p_val="any"
+                local new_a_val
+                
+                if [[ "$m_choice" == "1" ]]; then
+                    new_p_val="any"
+                elif [[ "$m_choice" == "2" ]]; then
+                    new_p_val=$(safe_read "Введите порты для блокировки (например, 80,443 или 22)" "$current_p") || continue
+                else
+                    continue
+                fi
+                
+                new_a_val="ufw[name=${jail_name//-/_}, port=${new_p_val}, protocol=tcp]"
+                
+                if grep -q "^\s*\[$jail_name\]" /etc/fail2ban/jail.local 2>/dev/null; then
+                    run_cmd sed -i "/^\[$jail_name\]/,/^\s*\[/ s|^\s*port\s*=.*|port = ${new_p_val}|" /etc/fail2ban/jail.local
+                    run_cmd sed -i "/^\[$jail_name\]/,/^\s*\[/ s|^\s*action\s*=.*|action = ${new_a_val}|" /etc/fail2ban/jail.local
+                    ok "Метод блокировки обновлен в конфигурации."
+                    [[ "$is_enabled" == "true" ]] && run_cmd systemctl reload fail2ban
+                fi
+                
+                # Обновляем локальные переменные для корректного отображения и будущего включения
+                current_p="$new_p_val"
+                current_a="$new_a_val"
+                
+                ok "Метод блокировки выбран: $new_p_val"
+                wait_for_enter
+                ;;
+            b|B) break ;;
+            *) warn "Неверный выбор" ;;
+        esac
+        disable_graceful_ctrlc
+    done
 }
 

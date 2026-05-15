@@ -175,7 +175,10 @@ def create_app(config_path: str = "config/gateway.yml") -> FastAPI:
 
     default_target = cfg.raw.get("project", {}).get("default_target")
     if not default_target:
-        raise ValueError("В конфиге project.default_target должно быть задано значение по умолчанию для /start")
+        raise ValueError(
+            "В конфиге quick_setup.default_offer должно быть задано значение по умолчанию для /start. "
+            "Пример: default_offer: wl-lte"
+        )
 
     landing_mode = landing_cfg.get("mode", "template")
 

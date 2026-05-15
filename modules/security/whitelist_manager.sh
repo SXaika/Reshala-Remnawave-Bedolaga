@@ -79,8 +79,9 @@ global_whitelist_add_ip() {
     local comment="${2:-Manual}"
     _gwl_ensure_file
 
-    if ! validate_ip "$ip"; then
-        err "Некорректный IP адрес: $ip"
+    # Допускаем IP или CIDR-подсеть (10.0.0.0/8)
+    if ! validate_ip_or_cidr "$ip"; then
+        err "Некорректный IP адрес или CIDR: $ip"
         return 1
     fi
 
@@ -112,10 +113,130 @@ global_whitelist_remove_ip() {
     return 0
 }
 
+# Автоматически добавляет системные IP в НАЧАЛО файла (IN не стирая существующие)
+global_whitelist_prepend_system_ips() {
+    _gwl_ensure_file
+
+    # Собираем системные IP с описаниями
+    local -A system_ips_map  # ip -> comment
+    system_ips_map["127.0.0.1"]="Локальный хост — без этого IP сервер блокирует сам себя"
+    system_ips_map["::1"]="Локальный хост IPv6 — обязательно для корректной работы"
+    system_ips_map["172.16.0.0/12"]="Сеть Docker-контейнеров — без этого блокируется весь Docker"
+    system_ips_map["10.0.0.0/8"]="Внутренние сети — типичная сеть для VPS/облака"
+    system_ips_map["192.168.0.0/16"]="Локальная сеть Docker и bridge-интерфейсы"
+
+    # IP самого сервера (Внутренний)
+    local server_ip
+    server_ip=$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="src") print $(i+1)}' | head -1)
+    if [[ -n "$server_ip" ]] && validate_ip "$server_ip" 2>/dev/null; then
+        system_ips_map["${server_ip}"]="Внутренний IP сервера — защита от самобана"
+    fi
+
+    # IP самого сервера (Публичный)
+    local public_ip
+    public_ip=$(curl -s --max-time 3 https://api.ipify.org 2>/dev/null)
+    if [[ -n "$public_ip" && "$public_ip" != "$server_ip" ]] && validate_ip "$public_ip" 2>/dev/null; then
+        system_ips_map["${public_ip}"]="Публичный IP сервера — защита от самобана"
+    fi
+
+    # Читаем текущее содержимое файла
+    local current_content
+    current_content=$(cat "$GLOBAL_WHITELIST_FILE" 2>/dev/null || echo "")
+
+    # Строим блок для вставки (только новые IP, которых ещё нет в файле)
+    local new_block=""
+    local added_any=0
+
+    # Фиксированный порядок добавления (сначала IPv4, потом сети, потом IPv6)
+    local ordered_keys=("127.0.0.1" "::1" "${server_ip}" "${public_ip}" "10.0.0.0/8" "172.16.0.0/12" "192.168.0.0/16")
+
+    local first_entry=1
+    for ip_key in "${ordered_keys[@]}"; do
+        [[ -z "$ip_key" ]] && continue
+        local comment="${system_ips_map[$ip_key]:-Системный IP}"
+
+        # Пропускаем, если уже есть
+        if echo "$current_content" | grep -q "^${ip_key}\b"; then
+            continue
+        fi
+
+        if [[ "$first_entry" -eq 1 ]]; then
+            if ! echo "$current_content" | grep -q "СИСТЕМНЫЕ IP — НЕ УДАЛЯТЬ"; then
+                new_block+="# ─────────────────────────────────────────────────────────────────
+# ⚠️  СИСТЕМНЫЕ IP — НЕ УДАЛЯТЬ! Добавлено автоматически Reshala.
+# Если удалить эти IP — система начнёт блокировать саму себя и свои рабочие процессы.
+# ─────────────────────────────────────────────────────────────────
+"
+            fi
+            first_entry=0
+        fi
+        new_block+="${ip_key} # ${comment}
+"
+        ((added_any++))
+    done
+
+    if [[ "$added_any" -gt 0 ]]; then
+        # Вставляем новый блок ПОСЛЕ шапки (первые строки с #)
+        python3 - "$GLOBAL_WHITELIST_FILE" "$new_block" <<'PYEOF'
+import sys
+fpath = sys.argv[1]
+new_block = sys.argv[2]
+with open(fpath, 'r') as f:
+    lines = f.readlines()
+
+# Находим первую не-комментную строку для вставки перед ней
+insert_at = len(lines)  # по умолчанию — в конец
+for i, line in enumerate(lines):
+    stripped = line.strip()
+    if stripped and not stripped.startswith('#'):
+        insert_at = i
+        break
+
+new_lines = lines[:insert_at] + [new_block] + lines[insert_at:]
+with open(fpath, 'w') as f:
+    f.writelines(new_lines)
+PYEOF
+
+        debug_log "GWL_PREPEND: Добавлено ${added_any} системных IP в начало белого списка."
+    else
+        debug_log "GWL_PREPEND: Новых системных IP нет, пропуск добавления."
+    fi
+
+    # Очистка возможных дублей шапки (авто-фикс для существующих файлов)
+    python3 - "$GLOBAL_WHITELIST_FILE" <<'PYEOF'
+import sys
+fpath = sys.argv[1]
+with open(fpath, 'r') as f:
+    lines = f.readlines()
+out = []
+seen = False
+skip = 0
+for i, line in enumerate(lines):
+    if skip > 0:
+        skip -= 1
+        continue
+    if 'СИСТЕМНЫЕ IP — НЕ УДАЛЯТЬ' in line:
+        if seen:
+            if len(out) > 0 and '──────' in out[-1]:
+                out.pop()
+            skip = 2
+            continue
+        seen = True
+    out.append(line)
+with open(fpath, 'w') as f:
+    f.writelines(out)
+PYEOF
+
+    debug_log "GWL_PREPEND: Добавлено ${added_any} системных IP в начало белого списка."
+}
+
 # Полная синхронизация всех подсистем
 global_whitelist_sync_all() {
     _gwl_ensure_file
     info "Синхронизация Глобального Белого Списка..."
+
+    # Сначала добавляем системные IP (чтобы сами себя не блокировали)
+    global_whitelist_prepend_system_ips
 
     local ips
     mapfile -t ips < <(global_whitelist_get_ips)
@@ -129,6 +250,9 @@ global_whitelist_sync_all() {
 
     # --- 3. Geo-block ipset ---
     _gwl_sync_geoblock "${ips[@]}"
+
+    # --- 4. UFW Anti-DDoS before.rules ---
+    _gwl_sync_ufw "${ips[@]}"
 
     ok "Синхронизация завершена. Подключено IP: ${C_CYAN}${count}${C_RESET}"
 }
@@ -235,7 +359,7 @@ _gwl_sync_geoblock() {
         [[ "$family" == "inet6" ]] && set_name="reshala_geo_whitelist6"
 
         if ! ipset list "$set_name" &>/dev/null; then
-            run_cmd ipset create "$set_name" hash:ip family "$family" hashsize 256 maxelem 1024 2>/dev/null || true
+            run_cmd ipset create "$set_name" hash:net family "$family" hashsize 256 maxelem 1024 2>/dev/null || true
         fi
         run_cmd ipset flush "$set_name" 2>/dev/null || true
     done
@@ -252,12 +376,64 @@ _gwl_sync_geoblock() {
     debug_log "GWL_SYNC: Geo-block whitelist (v4/v6) обновлен."
 }
 
+# Синхронизация с UFW Anti-DDoS (before.rules)
+# Добавляет whitelist IP в блок Reshala Anti-DDoS если он уже настроен
+_gwl_sync_ufw() {
+    local ips=("$@")
+    local before_rules="/etc/ufw/before.rules"
+    local antiddos_start="# --- НАЧАЛО: Reshala Anti-DDoS ---"
+
+    if [[ ! -f "$before_rules" ]]; then
+        debug_log "GWL_SYNC: UFW before.rules не найден, пропуск."
+        return
+    fi
+
+    if ! grep -q "$antiddos_start" "$before_rules" 2>/dev/null; then
+        debug_log "GWL_SYNC: Anti-DDoS блок в UFW не настроен, пропуск."
+        return
+    fi
+
+    # Удаляем старые whitelist-записи
+    python3 - <<'PYEOF'
+import re
+with open('/etc/ufw/before.rules', 'r') as f:
+    content = f.read()
+content = re.sub(r'# Whitelist: [^\n]+\n-A ufw-before-input -s [^\n]+ -j ACCEPT\n', '', content)
+with open('/etc/ufw/before.rules', 'w') as f:
+    f.write(content)
+PYEOF
+
+    # Добавляем актуальные whitelist-записи перед блоком Anti-DDoS
+    local wl_lines=""
+    for ip in "${ips[@]}"; do
+        wl_lines="${wl_lines}# Whitelist: ${ip}\n-A ufw-before-input -s ${ip} -j ACCEPT\n"
+    done
+
+    if [[ -n "$wl_lines" ]]; then
+        python3 - "$wl_lines" <<'PYEOF'
+import sys
+wl = sys.argv[1]
+with open('/etc/ufw/before.rules', 'r') as f:
+    content = f.read()
+target = '# --- НАЧАЛО: Reshala Anti-DDoS ---'
+if target in content:
+    content = content.replace(target, wl.replace('\\n', '\n') + target, 1)
+    with open('/etc/ufw/before.rules', 'w') as f:
+        f.write(content)
+PYEOF
+    fi
+
+    run_cmd ufw reload 2>/dev/null || true
+    debug_log "GWL_SYNC: UFW before.rules whitelist обновлен (${#ips[@]} IP)."
+}
+
 # ============================================================ #
 #                           МЕНЮ                               #
 # ============================================================ #
 
 show_global_whitelist_menu() {
     _gwl_ensure_file
+    global_whitelist_prepend_system_ips
 
     while true; do
         clear
@@ -285,15 +461,28 @@ show_global_whitelist_menu() {
         if [[ "$count" -gt 0 ]]; then
             info "Доверенные IP (${C_CYAN}${count}${C_RESET}):"
             local i=1
+            local sys_count=0
             while IFS= read -r line; do
                 [[ -z "$line" ]] && continue
                 [[ "$line" =~ ^[[:space:]]*# ]] && continue
                 local ip comment
                 ip=$(echo "$line" | awk '{print $1}')
                 comment=$(echo "$line" | sed 's/^[^ ]* *# *//' | sed 's/^[^ ]*$//')
+                
+                # Проверяем, является ли это системным IP (на основе комментария)
+                # Публичный IP специально не включен, чтобы он отображался как обычный добавленный IP
+                if [[ "$comment" != *"(Публичный)"* ]] && [[ "$comment" == *"Локальный хост"* || "$comment" == *"Внутренний IP сервера"* || "$comment" == *"Внутренние сети"* || "$comment" == *"Сеть Docker"* || "$comment" == *"Локальная сеть"* || "$comment" == *"Системный IP"* || "$comment" == *"IP этого сервера"* ]]; then
+                    ((sys_count++))
+                    continue
+                fi
+                
                 printf_description "${C_WHITE}${i})${C_RESET} ${C_CYAN}${ip}${C_RESET}${comment:+  ${C_GRAY}(${comment})${C_RESET}}"
                 ((i++))
             done < <(grep -v '^\s*#' "$GLOBAL_WHITELIST_FILE" | grep -v '^\s*$')
+            
+            if [[ "$sys_count" -gt 0 ]]; then
+                printf_description "${C_WHITE}*)${C_RESET} ${C_CYAN}СИСТЕМНЫЕ IP${C_RESET}  ${C_GRAY}(Локальные и Docker адреса, защита от самобана. Скрыто: ${sys_count})${C_RESET}"
+            fi
         else
             warn "Список пуст. Добавьте IP для защиты от блокировок."
         fi

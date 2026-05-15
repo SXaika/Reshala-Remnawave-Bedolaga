@@ -47,25 +47,28 @@ ufw default deny incoming >/dev/null
 ufw default allow outgoing >/dev/null
 
 # --- СИНХРОНИЗАЦИЯ ГЛОБАЛЬНОГО БЕЛОГО СПИСКА ---
+temp_gwl=$(mktemp)
 if [[ -n "${GWL_B64:-}" ]]; then
-    info "Синхронизирую Глобальный Белый Список с Мастер-сервера..."
-    temp_gwl=$(mktemp)
     echo "$GWL_B64" | base64 -d > "$temp_gwl" 2>/dev/null || true
-    
-    if [[ -s "$temp_gwl" ]]; then
-        # Читаем IP, игнорируя комментарии
-        ips=$(grep -v '^\s*#' "$temp_gwl" | grep -v '^\s*$' | awk '{print $1}')
-        count=0
-        for ip in $ips; do
-            ufw allow from "$ip" comment 'GWL Trusted' >/dev/null
-            ((count++))
-        done
-        ok "Добавлено $count IP из Глобального Белого Списка."
-    fi
-    rm -f "$temp_gwl"
-else
-    warn "Глобальный Белый Список не передан. Используются только стандартные правила."
 fi
+if [[ -f "/etc/reshala/global-whitelist.txt" ]]; then
+    cat "/etc/reshala/global-whitelist.txt" >> "$temp_gwl"
+fi
+
+if [[ -s "$temp_gwl" ]]; then
+    info "Синхронизирую Глобальный Белый Список (Мастер + Локальный)..."
+    # Читаем IP, игнорируя комментарии, сортируем и удаляем дубликаты
+    ips=$(grep -v '^\s*#' "$temp_gwl" | grep -v '^\s*$' | awk '{print $1}' | sort -u)
+    count=0
+    for ip in $ips; do
+        ufw allow from "$ip" comment 'GWL Trusted' >/dev/null
+        ((count++))
+    done
+    ok "Добавлено $count уникальных IP из Глобального Белого Списка."
+else
+    warn "Глобальный Белый Список пуст. Используются только стандартные правила."
+fi
+rm -f "$temp_gwl"
 
 # Разрешаем SSH для всех (если не в GWL), иначе можно потерять доступ
 # Если GWL был пуст, то это единственный способ зайти.

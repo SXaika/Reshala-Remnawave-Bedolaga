@@ -33,20 +33,23 @@ run() {
 
     # --- Подготовка Белого Списка (ignoreip) ---
     local ignore_list="127.0.0.1/8 ::1"
+    temp_gwl=$(mktemp)
     if [[ -n "${GWL_B64:-}" ]]; then
-        info "Синхронизирую ignoreip с Глобальным Белым Списком..."
-        temp_gwl=$(mktemp)
         echo "$GWL_B64" | base64 -d > "$temp_gwl" 2>/dev/null || true
-        
-        if [[ -s "$temp_gwl" ]]; then
-            ips=$(grep -v '^\s*#' "$temp_gwl" | grep -v '^\s*$' | awk '{print $1}')
-            for ip in $ips; do
-                ignore_list="${ignore_list} ${ip}"
-            done
-            ok "Добавлено IP в исключения."
-        fi
-        rm -f "$temp_gwl"
     fi
+    if [[ -f "/etc/reshala/global-whitelist.txt" ]]; then
+        cat "/etc/reshala/global-whitelist.txt" >> "$temp_gwl"
+    fi
+
+    if [[ -s "$temp_gwl" ]]; then
+        info "Синхронизирую ignoreip с Глобальным Белым Списком (Мастер + Локальный)..."
+        ips=$(grep -v '^\s*#' "$temp_gwl" | grep -v '^\s*$' | awk '{print $1}' | sort -u)
+        for ip in $ips; do
+            ignore_list="${ignore_list} ${ip}"
+        done
+        ok "Добавлено IP в исключения Fail2Ban."
+    fi
+    rm -f "$temp_gwl"
 
     # --- Настройка ---
     JAIL_CONFIG="/etc/fail2ban/jail.local"
