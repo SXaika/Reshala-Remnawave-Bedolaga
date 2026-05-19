@@ -816,13 +816,61 @@ _vgw_nginx_inject_auto() {
     local ntype="$1" cname="${2:-}" cpath="${3:-}" csrc="${4:-none}" domain="$5" gport="$6"
     local cert="" key=""
 
-    # Определяем сертификаты
-    local csrc_type="${csrc%%:*}" csrc_path="${csrc#*:}"
-    if [[ "$csrc_type" != "none" && -n "$csrc_path" ]]; then
-        cert="${csrc_path}/fullchain.pem"
-        key="${csrc_path}/privkey.pem"
-        [[ -f "$cert" ]] || cert=""
-        [[ -f "$key" ]]  || key=""
+    local is_fallback="0"
+    if [[ "$ntype" == *":hostnet"* || "$ntype" == "host:nginx" ]]; then
+        if [[ -n "$cpath" && -f "$cpath" ]]; then
+            if grep -q "nginx_http.sock" "$cpath"; then
+                is_fallback="1"
+            fi
+        else
+            for p in "/etc/nginx/nginx.conf" "/opt/remnawave/nginx.conf"; do
+                if [[ -f "$p" ]] && grep -q "nginx_http.sock" "$p"; then
+                    is_fallback="1"
+                    break
+                fi
+            done
+        fi
+    fi
+
+    if [[ "$is_fallback" == "1" ]]; then
+        warn "Обнаружена сложная архитектура Xray Stream Fallback."
+        warn "Автоматический инжект может нарушить сложную маршрутизацию VPN."
+        return 1
+    fi
+
+    local csrc_type="" csrc_host="" csrc_container=""
+    if [[ "$csrc" == *":"* ]]; then
+        csrc_type=$(echo "$csrc" | cut -d: -f1)
+        csrc_host=$(echo "$csrc" | cut -d: -f2)
+        csrc_container=$(echo "$csrc" | cut -d: -f3-)
+    else
+        csrc_type="$csrc"
+    fi
+
+    if [[ "$csrc_type" != "none" ]]; then
+        if [[ -n "$cname" ]]; then
+            if [[ "$csrc_type" == "reshala" ]]; then
+                cert="/etc/nginx/certs/fullchain.pem"
+                key="/etc/nginx/certs/privkey.pem"
+            else
+                # Если это внешний nginx, проверяем существование файлов на хосте,
+                # но пути прописываем контейнерные!
+                local host_cert="${csrc_host}/fullchain.pem"
+                local host_key="${csrc_host}/privkey.pem"
+                if [[ -f "$host_cert" && -f "$host_key" ]]; then
+                    cert="${csrc_container}/fullchain.pem"
+                    key="${csrc_container}/privkey.pem"
+                fi
+            fi
+        else
+            # Хостовый nginx
+            local host_cert="${csrc_host}/fullchain.pem"
+            local host_key="${csrc_host}/privkey.pem"
+            if [[ -f "$host_cert" && -f "$host_key" ]]; then
+                cert="$host_cert"
+                key="$host_key"
+            fi
+        fi
     fi
 
     case "$ntype" in
@@ -885,25 +933,164 @@ _vgw_nginx_manual_guide() {
     local ntype="$1" cname="${2:-}" cpath="${3:-}" csrc="${4:-none}" domain="$5" gport="$6"
     local W="$C_YELLOW" C="$C_CYAN" G="$C_GREEN" R="$C_RED" B="$C_BOLD" E="$C_RESET"
 
-    local cert="" key=""
-    local csrc_type="${csrc%%:*}" csrc_path="${csrc#*:}"
-    if [[ "$csrc_type" != "none" && -n "$csrc_path" ]]; then
-        cert="${csrc_path}/fullchain.pem"
-        key="${csrc_path}/privkey.pem"
-        [[ -f "$cert" ]] || cert=""
-        [[ -f "$key" ]]  || key=""
+    local csrc_type="" csrc_host="" csrc_container=""
+    if [[ "$csrc" == *":"* ]]; then
+        csrc_type=$(echo "$csrc" | cut -d: -f1)
+        csrc_host=$(echo "$csrc" | cut -d: -f2)
+        csrc_container=$(echo "$csrc" | cut -d: -f3-)
+    else
+        csrc_type="$csrc"
     fi
 
-    # Наш докер-монтируемый нотис
+    local cert="" key=""
     local docker_mount_notice="0"
-    if [[ -n "$cname" && "$csrc_type" == "reshala" ]]; then
-        docker_mount_notice="1"
-        cert="/etc/nginx/certs/fullchain.pem"
-        key="/etc/nginx/certs/privkey.pem"
+
+    if [[ -n "$cname" ]]; then
+        if [[ "$csrc_type" == "reshala" ]]; then
+            docker_mount_notice="1"
+            cert="/etc/nginx/certs/fullchain.pem"
+            key="/etc/nginx/certs/privkey.pem"
+        else
+            # Если это внешние сертификаты, проверяем существование на хосте
+            local host_cert="${csrc_host}/fullchain.pem"
+            local host_key="${csrc_host}/privkey.pem"
+            if [[ -f "$host_cert" && -f "$host_key" ]]; then
+                # Используем путь внутри контейнера
+                cert="${csrc_container}/fullchain.pem"
+                key="${csrc_container}/privkey.pem"
+            else
+                cert=""
+                key=""
+            fi
+        fi
+    else
+        # Хостовый nginx
+        local host_cert="${csrc_host}/fullchain.pem"
+        local host_key="${csrc_host}/privkey.pem"
+        if [[ -f "$host_cert" && -f "$host_key" ]]; then
+            cert="$host_cert"
+            key="$host_key"
+        fi
     fi
 
     local conf_content
     conf_content=$(_vgw_nginx_generate_conf "$domain" "$gport" "$cert" "$key")
+
+    local is_fallback="0"
+    local fallback_cfg=""
+    if [[ "$ntype" == *":hostnet"* || "$ntype" == "host:nginx" ]]; then
+        if [[ -n "$cpath" && -f "$cpath" ]]; then
+            if grep -q "nginx_http.sock" "$cpath"; then
+                is_fallback="1"
+                fallback_cfg="$cpath"
+            fi
+        else
+            for p in "/etc/nginx/nginx.conf" "/opt/remnawave/nginx.conf"; do
+                if [[ -f "$p" ]] && grep -q "nginx_http.sock" "$p"; then
+                    is_fallback="1"
+                    fallback_cfg="$p"
+                    break
+                fi
+            done
+        fi
+    fi
+
+    if [[ "$is_fallback" == "1" ]]; then
+        echo -e "  ${R}${B}╔══════════════════════════════════════════════════════════════╗${E}"
+        echo -e "  ${R}${B}║${E}  ⚠️  ${B}ОБНАРУЖЕНА АРХИТЕКТУРА STREAM FALLBACK (UNIX-СОКЕТЫ)${E}        ${R}${B}║${E}"
+        echo -e "  ${R}${B}╚══════════════════════════════════════════════════════════════╝${E}"
+        echo -e "  Ваш Nginx использует пересылку через Xray (443 -> Stream -> Unix-сокет)."
+        echo -e "  Для корректной работы домена ${G}${domain}${E} требуется ручная настройка."
+        echo ""
+        echo -e "  ${B}Шаг 1: Добавьте новый домен в роутер в блоке stream {}${E}"
+        echo -e "     Открывайте файл конфигурации Nginx:"
+        echo -e "  ${G}     nano ${fallback_cfg}${E}"
+        echo ""
+        echo -e "     Найдите блок ${B}stream {}${E} и карту ${B}map \$ssl_preread_server_name \$route_to${E}."
+        echo -e "     Добавьте ваш домен в список перед ${B}default${E}:"
+        echo ""
+        echo -e "  ${C}       map \$ssl_preread_server_name \$route_to {${E}"
+        echo -e "  ${C}           # ... существующие домены ...${E}"
+        echo -e "  ${G}           ${domain}    unix:/dev/shm/nginx_http.sock;  # <--- Добавить эту строку!${E}"
+        echo -e "  ${C}           default                       unix:/dev/shm/nginx_external.sock;${E}"
+        echo -e "  ${C}       }${E}"
+        echo ""
+        echo -e "  ${B}Шаг 2: Добавьте server-блоки в блок http {}${E}"
+        echo -e "     В этом же файле внутри блока ${B}http {}${E} (вне других server-блоков, перед закрывающей })"
+        echo -e "     добавьте следующие блоки:"
+        echo "  ────────────────────────────────────────────────────"
+
+        local stream_ssl_cert="/opt/certwardenclient/certs/fullchain.pem"
+        local stream_ssl_key="/opt/certwardenclient/certs/privkey.pem"
+        if [[ -n "$cert" && -n "$key" ]]; then
+            stream_ssl_cert="$cert"
+            stream_ssl_key="$key"
+        fi
+
+        cat <<EOF
+server {
+    listen 80;
+    listen [::]:80;
+    server_name ${domain};
+
+    location ^~ /.well-known/acme-challenge/ {
+        root /var/www/acme-challenge;
+        try_files \$uri =404;
+    }
+    location / {
+        return 301 https://\$host\$request_uri;
+    }
+}
+
+server {
+    # Слушаем тот же Unix-сокет с включенным SSL и proxy_protocol!
+    listen unix:/dev/shm/nginx_http.sock proxy_protocol ssl;
+    http2 on;
+    server_name ${domain};
+
+    # Восстанавливаем реальный IP клиента
+    set_real_ip_from unix:;
+    real_ip_header proxy_protocol;
+
+    # Логи
+    access_log /var/log/nginx_custom/${domain}_access.log;
+    error_log /var/log/nginx_custom/${domain}_error.log;
+
+    # Сертификаты (используются пути, доступные Nginx)
+    ssl_certificate     "${stream_ssl_cert}";
+    ssl_certificate_key "${stream_ssl_key}";
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_session_cache shared:SSL:10m;
+    ssl_session_timeout 10m;
+
+    location / {
+        proxy_pass https://127.0.0.1:${gport};
+        proxy_http_version 1.1;
+        proxy_ssl_verify off;
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_connect_timeout 5s;
+        proxy_send_timeout 60s;
+        proxy_read_timeout 60s;
+    }
+}
+EOF
+        echo "  ────────────────────────────────────────────────────"
+        echo ""
+        echo -e "  ${B}Шаг 3: Проверьте и перезагрузите Nginx${E}"
+        if [[ -n "$cname" ]]; then
+            echo -e "  ${G}  docker exec ${cname} nginx -t${E}"
+            echo -e "  ${G}  docker exec ${cname} nginx -s reload${E}"
+        else
+            echo -e "  ${G}  nginx -t && systemctl reload nginx${E}"
+        fi
+        echo ""
+        return 0
+    fi
 
     echo ""
     echo -e "  ${W}${B}╔══════════════════════════════════════════════════════════════╗${E}"
@@ -911,25 +1098,47 @@ _vgw_nginx_manual_guide() {
     echo -e "  ${W}${B}╚══════════════════════════════════════════════════════════════╝${E}"
     echo ""
 
-    if [[ "$docker_mount_notice" == "1" ]]; then
-        echo -e "  ${G}${B}🔑 ОБНАРУЖЕНЫ СЕРТИФИКАТЫ!${E}"
-        echo -e "  На сервере найдены рабочие SSL-сертификаты в:"
-        echo -e "  ${C}${csrc_path}${E}"
+    if [[ -n "$cname" ]]; then
+        echo -e "  ${W}${B}╔══════════════════════════════════════════════════════════════╗${E}"
+        echo -e "  ${W}${B}║${E}  🐳  ${B}ОБЯЗАТЕЛЬНО К ПРОЧТЕНИЮ ДЛЯ DOCKER NGINX (${cname})${E}"
+        echo -e "  ${W}${B}╚══════════════════════════════════════════════════════════════╝${E}"
+        echo -e "  Ваш Nginx работает в изолированном контейнере Docker."
+        echo -e "  Ему требуются SSL-сертификаты. Проверьте ваш статус монтирования:"
         echo ""
-        echo -e "  Чтобы контейнер Nginx (${C}${cname}${E}) мог их прочесть, добавьте"
-        echo -e "  в секцию ${B}volumes:${E} вашего Nginx в ${B}docker-compose.yml${E}:"
-        echo -e "  ${G}    - ${csrc_path}:/etc/nginx/certs:ro${E}"
-        echo ""
-        echo -e "  После добавления перезапустите Nginx контейнер:"
-        echo -e "  ${G}  docker compose up -d${E}"
-        echo ""
-        echo -e "  Конфиг ниже уже настроен на использование путей ${G}/etc/nginx/certs/...${E}"
+        if [[ "$docker_mount_notice" == "1" ]]; then
+            echo -e "  ${G}${B}👉 ИСПОЛЬЗОВАНИЕ АВТО-СЕРТИФИКАТОВ BEDOLAGA / RESHALA${E}"
+            echo -e "     Для этого ${B}ОБЯЗАТЕЛЬНО${E} добавьте в секцию ${B}volumes:${E} вашего Nginx"
+            echo -e "     в файле ${B}docker-compose.yml${E} (или аналогичном) следующую строку:"
+            echo -e "  ${G}       - ${csrc_host}:/etc/nginx/certs:ro${E}"
+            echo ""
+            echo -e "     После добавления volumes перезапустите контейнер Nginx:"
+            echo -e "  ${G}     docker compose up -d${E}"
+            echo ""
+            echo -e "     (Конфиг Nginx ниже уже преднастроен на пути ${G}/etc/nginx/certs/...${E})"
+        else
+            echo -e "  ${G}${B}👉 ИСПОЛЬЗОВАНИЕ СУЩЕСТВУЮЩИХ СЕРТИФИКАТОВ (${csrc_type})${E}"
+            echo -e "     Мы обнаружили, что ваш Nginx уже примонтирован к папке с сертификатами"
+            echo -e "     на хосте: ${C}${csrc_host}${E} (внутри контейнера: ${C}${csrc_container}${E})."
+            echo ""
+            echo -e "     Поскольку папка ${B}УЖЕ примонтирована${E}, вносить изменения"
+            echo -e "     в ${B}docker-compose.yml${E} для Nginx ${G}НЕ ТРЕБУЕТСЯ!${E} Всё уже готово."
+            echo -e "     (Конфиг Nginx ниже автоматически настроен на пути внутри контейнера)"
+            echo ""
+            echo -e "  ${W}${B}👉 ЕСЛИ ВЫ ХОТИТЕ ПЕРЕЙТИ НА АВТО-СЕРТИФИКАТЫ BEDOLAGA / RESHALA${E}"
+            echo -e "     Если хотите, чтобы наш встроенный Let's Encrypt сам получал/продлевал SSL:"
+            echo -e "     1. Добавьте в секцию ${B}volumes:${E} вашего Nginx в ${B}docker-compose.yml${E}:"
+            echo -e "  ${W}          - $(_vgw_certs_dir):/etc/nginx/certs:ro${E}"
+            echo -e "     2. Перезапустите Nginx контейнер: ${W}docker compose up -d${E}"
+            echo -e "     3. В конфиге Nginx ниже замените пути к SSL на:"
+            echo -e "  ${W}          ssl_certificate     /etc/nginx/certs/fullchain.pem;${E}"
+            echo -e "  ${W}          ssl_certificate_key /etc/nginx/certs/privkey.pem;${E}"
+        fi
         echo "  ────────────────────────────────────────────────────"
         echo ""
     elif [[ "$csrc_type" == "reshala" && -z "$cname" ]]; then
         echo -e "  ${G}${B}🔑 ОБНАРУЖЕНЫ СЕРТИФИКАТЫ!${E}"
         echo -e "  На сервере найдены рабочие SSL-сертификаты в:"
-        echo -e "  ${C}${csrc_path}${E}"
+        echo -e "  ${C}${csrc_host}${E}"
         echo ""
         echo -e "  Конфиг ниже уже настроен на их использование напрямую!"
         echo "  ────────────────────────────────────────────────────"
