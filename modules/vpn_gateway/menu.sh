@@ -630,24 +630,37 @@ _vgw_detect_cert_source() {
     local container="${1:-}"
     # CertWarden?
     if [[ -n "$container" ]]; then
-        local cw_path
-        cw_path=$(docker inspect "$container" 2>/dev/null \
+        local cw_host cw_dest
+        cw_host=$(docker inspect "$container" 2>/dev/null \
             --format='{{range .Mounts}}{{.Source}}{{"\t"}}{{.Destination}}{{"\n"}}{{end}}' \
             | grep -i "certwardenclient\|certwarden" | head -1 | awk '{print $1}')
-        if [[ -n "$cw_path" ]]; then echo "certwarden:${cw_path}"; return 0; fi
+        cw_dest=$(docker inspect "$container" 2>/dev/null \
+            --format='{{range .Mounts}}{{.Source}}{{"\t"}}{{.Destination}}{{"\n"}}{{end}}' \
+            | grep -i "certwardenclient\|certwarden" | head -1 | awk '{print $2}')
+        if [[ -n "$cw_host" && -n "$cw_dest" ]]; then
+            echo "certwarden:${cw_host}:${cw_dest}"
+            return 0
+        fi
+
         # Let's Encrypt смонтирован?
         local le_host
         le_host=$(docker inspect "$container" 2>/dev/null \
             --format='{{range .Mounts}}{{if eq .Destination "/etc/letsencrypt"}}{{.Source}}{{end}}{{end}}' \
             | head -1)
-        [[ -n "$le_host" ]] && echo "letsencrypt:${le_host}" && return 0
+        if [[ -n "$le_host" ]]; then
+            echo "letsencrypt:${le_host}:/etc/letsencrypt"
+            return 0
+        fi
     fi
     # Let's Encrypt на хосте?
-    [[ -d /etc/letsencrypt/live ]] && echo "letsencrypt:/etc/letsencrypt" && return 0
+    if [[ -d /etc/letsencrypt/live ]]; then
+        echo "letsencrypt:/etc/letsencrypt:/etc/letsencrypt"
+        return 0
+    fi
     # Наш рабочий каталог сертификатов (всегда отдаем его, так как авто-восстановление переносит бэкапы сюда)
     local live_certs_dir; live_certs_dir="$(_vgw_certs_dir)"
     if [[ -f "${live_certs_dir}/fullchain.pem" || -f /etc/reshala-bedolaga/certs/fullchain.pem ]]; then
-        echo "reshala:${live_certs_dir}"
+        echo "reshala:${live_certs_dir}:/etc/nginx/certs"
         return 0
     fi
     echo "none"
@@ -959,8 +972,8 @@ _vgw_nginx_manual_guide() {
                 cert="${csrc_container}/fullchain.pem"
                 key="${csrc_container}/privkey.pem"
             else
-                cert=""
-                key=""
+                cert="/etc/nginx/certs/fullchain.pem"
+                key="/etc/nginx/certs/privkey.pem"
             fi
         fi
     else
@@ -970,6 +983,9 @@ _vgw_nginx_manual_guide() {
         if [[ -f "$host_cert" && -f "$host_key" ]]; then
             cert="$host_cert"
             key="$host_key"
+        else
+            cert="/etc/nginx/certs/fullchain.pem"
+            key="/etc/nginx/certs/privkey.pem"
         fi
     fi
 
@@ -1081,6 +1097,20 @@ server {
 EOF
         echo "  ────────────────────────────────────────────────────"
         echo ""
+        if [[ -n "$cname" ]]; then
+            echo -e "  ${R}${B}🐳 ОБЯЗАТЕЛЬНО: НАСТРОЙКА ТОМА (VOLUME) В DOCKER-COMPOSE ДЛЯ NGINX (${cname})${E}"
+            echo -e "  Поскольку ваш Nginx работает в контейнере Docker, ему требуются SSL-сертификаты."
+            echo -e "  Чтобы применить автоматические сертификаты Bedolaga / Reshala:"
+            echo ""
+            echo -e "  1. Откройте ваш ${B}docker-compose.yml${E} файл, где описан сервис Nginx (${cname}),"
+            echo -e "     и добавьте в секцию ${B}volumes:${E} следующую строку монтирования:"
+            echo -e "  ${G}       - $(_vgw_certs_dir):/etc/nginx/certs:ro${E}"
+            echo ""
+            echo -e "  2. Перезапустите контейнеры и проверьте логи командами:"
+            echo -e "  ${G}     docker compose down && docker compose up -d && docker compose logs -f${E}"
+            echo "  ────────────────────────────────────────────────────"
+            echo ""
+        fi
         echo -e "  ${B}Шаг 3: Проверьте и перезагрузите Nginx${E}"
         if [[ -n "$cname" ]]; then
             echo -e "  ${G}  docker exec ${cname} nginx -t${E}"
