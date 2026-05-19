@@ -741,17 +741,25 @@ _f2b_detect_nginx_log() {
         mapfile -t docker_paths < <(docker inspect --format '{{range .Mounts}}{{if eq .Type "bind"}}{{.Source}}{{"\n"}}{{end}}{{end}}' $(docker ps -a -q) 2>/dev/null | grep -i "log\|nginx" | sort -u)
         for dp in "${docker_paths[@]}"; do
             if [[ -d "$dp" ]]; then
-                mapfile -t -O ${#found_logs[@]} found_logs < <(find "$dp" -type f \( -name "*${log_type}*" -o -name "${log_type}.log" \) 2>/dev/null | head -5)
+                local d_logs=()
+                mapfile -t d_logs < <(find "$dp" -type f \( -name "*${log_type}*" -o -name "${log_type}.log" \) 2>/dev/null | head -5)
+                for dl in "${d_logs[@]}"; do
+                    if [[ ! " ${found_logs[*]} " =~ " ${dl} " ]]; then
+                        found_logs+=("$dl")
+                    fi
+                done
             fi
         done
     fi
 
     # Дополнительный умный поиск по всей системе (для случаев, когда контейнер остановлен или пути кастомные)
-    if [[ ${#found_logs[@]} -eq 0 ]]; then
-        # Ищем файлы *.log, содержащие в названии "access" или "error", 
-        # у которых в полном пути есть nginx, reshala, remnawave, proxy или gate
-        mapfile -t found_logs < <(find /var/log /opt /home -type f \( -name "*${log_type}*.log" -o -name "${log_type}.log" \) \( -path "*nginx*" -o -path "*reshala*" -o -path "*remnawave*" -o -path "*proxy*" \) 2>/dev/null | head -15)
-    fi
+    local extra_logs=()
+    mapfile -t extra_logs < <(find /var/log /opt /home -type f \( -name "*${log_type}*.log" -o -name "${log_type}.log" \) \( -path "*nginx*" -o -path "*reshala*" -o -path "*remnawave*" -o -path "*proxy*" \) 2>/dev/null | head -15)
+    for el in "${extra_logs[@]}"; do
+        if [[ ! " ${found_logs[*]} " =~ " ${el} " ]]; then
+            found_logs+=("$el")
+        fi
+    done
 
     if [[ ${#found_logs[@]} -gt 0 ]]; then
         info "Подсказка по выбору лог-файла:"
@@ -839,6 +847,20 @@ _f2b_detect_syslog() {
     else
         warn "Системные логи не найдены."
         F2B_SELECTED_LOG=$(ask_non_empty "Введите полный путь к системному логу") || return 1
+    fi
+}
+
+_f2b_reload_or_start() {
+    if systemctl is-active --quiet fail2ban; then
+        info "Перезагружаю конфигурацию Fail2Ban..."
+        run_cmd systemctl reload fail2ban 2>/dev/null || run_cmd systemctl restart fail2ban
+    else
+        info "Сервис Fail2Ban не активен. Пытаюсь запустить его..."
+        if run_cmd systemctl start fail2ban; then
+            ok "Сервис Fail2Ban успешно запущен!"
+        else
+            err "Не удалось запустить Fail2Ban. Проверьте конфигурацию с помощью 'fail2ban-client -d'."
+        fi
     fi
 }
 
@@ -937,7 +959,7 @@ _f2b_jail_submenu() {
                 if [[ "$is_enabled" == "true" ]]; then
                     run_cmd sed -i "/^\[$jail_name\]/,/^\s*\[/ s/enabled\s*=\s*true/enabled = false/" /etc/fail2ban/jail.local
                     ok "Защита '$jail_name' выключена."
-                    run_cmd systemctl reload fail2ban 2>/dev/null || run_cmd systemctl restart fail2ban
+                    _f2b_reload_or_start
                 else
                     if [[ "$current_log" == "Не задан" ]]; then
                         warn "Сначала необходимо выбрать лог-файл (опция 3)."
@@ -981,7 +1003,7 @@ JAIL
                         run_cmd sed -i "/^\[$jail_name\]/,/^\s*\[/ s/enabled\s*=\s*false/enabled = true/" /etc/fail2ban/jail.local
                     fi
                     ok "Защита '$jail_name' включена."
-                    run_cmd systemctl reload fail2ban 2>/dev/null || run_cmd systemctl restart fail2ban
+                    _f2b_reload_or_start
                 fi
                 wait_for_enter
                 ;;
@@ -996,7 +1018,7 @@ JAIL
                             run_cmd sed -i "/^\[$jail_name\]/a maxretry = $new_maxretry" /etc/fail2ban/jail.local
                         fi
                         ok "maxretry обновлен до $new_maxretry"
-                        [[ "$is_enabled" == "true" ]] && run_cmd systemctl reload fail2ban
+                        [[ "$is_enabled" == "true" ]] && _f2b_reload_or_start
                     else
                         warn "Сначала включите защиту, чтобы конфигурация была создана."
                     fi
@@ -1038,7 +1060,7 @@ JAIL
                             fi
                         fi
                         ok "Лог обновлен."
-                        [[ "$is_enabled" == "true" ]] && run_cmd systemctl reload fail2ban
+                        [[ "$is_enabled" == "true" ]] && _f2b_reload_or_start
                     else
                         # Store in temp var until enabled
                         current_log="$F2B_SELECTED_LOG"
@@ -1054,7 +1076,7 @@ JAIL
                 fi
                 run_cmd nano "$filter_file"
                 ok "Если вы внесли изменения, они будут применены."
-                [[ "$is_enabled" == "true" ]] && run_cmd systemctl reload fail2ban 2>/dev/null
+                [[ "$is_enabled" == "true" ]] && _f2b_reload_or_start
                 ;;
             5)
                 echo -e "\n  ${C_CYAN}Выберите метод блокировки:${C_RESET}"
@@ -1081,7 +1103,7 @@ JAIL
                     run_cmd sed -i "/^\[$jail_name\]/,/^\s*\[/ s|^\s*port\s*=.*|port = ${new_p_val}|" /etc/fail2ban/jail.local
                     run_cmd sed -i "/^\[$jail_name\]/,/^\s*\[/ s|^\s*action\s*=.*|action = ${new_a_val}|" /etc/fail2ban/jail.local
                     ok "Метод блокировки обновлен в конфигурации."
-                    [[ "$is_enabled" == "true" ]] && run_cmd systemctl reload fail2ban
+                    [[ "$is_enabled" == "true" ]] && _f2b_reload_or_start
                 fi
                 
                 # Обновляем локальные переменные для корректного отображения и будущего включения
