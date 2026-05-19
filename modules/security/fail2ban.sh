@@ -281,49 +281,82 @@ _f2b_update_ignoreip() {
     fi
     
     info "Обновляю ignoreip в /etc/fail2ban/jail.local..."
-    run_cmd sed -i -e "s,^ignoreip\s*=.*,ignoreip = $whitelist_ips," /etc/fail2ban/jail.local
-    run_cmd systemctl reload fail2ban
+    
+    # Сверхнадежное обновление ignoreip с помощью Python
+    python3 - "$whitelist_ips" <<'PYEOF'
+import sys
+import re
+
+fpath = "/etc/fail2ban/jail.local"
+ignoreip_val = sys.argv[1]
+
+try:
+    with open(fpath, "r") as f:
+        content = f.read()
+
+    # Ищем ignoreip (любые отступы, опциональный комментарий #)
+    pattern = re.compile(r"^[ \t]*#?[ \t]*ignoreip[ \t]*=[ \t]*.*$", re.MULTILINE | re.IGNORECASE)
+
+    if pattern.search(content):
+        content = pattern.sub(f"ignoreip = {ignoreip_val}", content)
+    else:
+        # Если нет, ищем [DEFAULT]
+        default_pattern = re.compile(r"^\[DEFAULT\]", re.MULTILINE | re.IGNORECASE)
+        if default_pattern.search(content):
+            content = default_pattern.sub(f"[DEFAULT]\nignoreip = {ignoreip_val}", content, 1)
+        else:
+            content = f"[DEFAULT]\nignoreip = {ignoreip_val}\n\n" + content
+
+    with open(fpath, "w") as f:
+        f.write(content)
+except Exception as e:
+    sys.stderr.write(f"Error updating jail.local: {e}\n")
+    sys.exit(1)
+PYEOF
+
+    _f2b_reload_or_start
     ok "Whitelist в Fail2Ban обновлен."
 }
 
 _f2b_whitelist_menu() {
     # 1. Проверяем синхронизацию с Глобальным Белым Списком
     local global_file="/etc/reshala/global-whitelist.txt"
-    if [[ -f "$global_file" ]]; then
+    while true; do
         local is_synced=false
-        if [[ -f "$F2B_WHITELIST_FILE" ]]; then
-            local local_sum; local_sum=$(grep -v '^\s*#' "$F2B_WHITELIST_FILE" | grep -v '^\s*$' | sort | md5sum | awk '{print $1}')
-            local global_sum; global_sum=$(grep -v '^\s*#' "$global_file" | grep -v '^\s*$' | sort | md5sum | awk '{print $1}')
-            [[ "$local_sum" == "$global_sum" ]] && is_synced=true
-        fi
-
-        if [[ "$is_synced" == "true" ]]; then
-            echo -e "  ${C_GREEN}✓ Текущий список синхронизирован с Глобальным Белым Списком.${C_RESET}"
-            echo -e "  ${C_GRAY}Изменения в Глобальном списке будут автоматически применяться здесь.${C_RESET}"
-            echo ""
-        else
-            if global_whitelist_offer "Fail2Ban"; then
-                info "Копирую IP из Глобального Белого Списка в Fail2Ban..."
-                run_cmd cp -f "$global_file" "$F2B_WHITELIST_FILE" 2>/dev/null || true
-                _f2b_update_ignoreip
-                wait_for_enter
-                return
+        if [[ -f "$global_file" ]]; then
+            if [[ -f "$F2B_WHITELIST_FILE" ]]; then
+                local local_sum; local_sum=$(grep -v '^\s*#' "$F2B_WHITELIST_FILE" | grep -v '^\s*$' | sort | md5sum | awk '{print $1}')
+                local global_sum; global_sum=$(grep -v '^\s*#' "$global_file" | grep -v '^\s*$' | sort | md5sum | awk '{print $1}')
+                [[ "$local_sum" == "$global_sum" ]] && is_synced=true
             fi
         fi
-    fi
 
-    # Ensure directory exists
-    run_cmd mkdir -p /etc/reshala
-    # Ensure file exists
-    run_cmd touch "$F2B_WHITELIST_FILE"
-
-    while true; do
         clear
         enable_graceful_ctrlc
         menu_header "📋 Whitelist Fail2Ban"
         printf_description "IP-адреса в этом списке никогда не будут забанены."
         
         print_separator
+        if [[ -f "$global_file" ]]; then
+            if [[ "$is_synced" == "true" ]]; then
+                echo -e "  ${C_GREEN}✓ Текущий список синхронизирован с Глобальным Белым Списком.${C_RESET}"
+                echo -e "  ${C_GRAY}Изменения в Глобальном списке будут автоматически применяться здесь.${C_RESET}"
+                echo ""
+            else
+                echo -e "  ${C_YELLOW}⚠ Внимание: список Fail2Ban отличается от Глобального Белого Списка.${C_RESET}"
+                echo -e "  ${C_GRAY}Рекомендуется выполнить принудительную синхронизацию в Глобальном меню.${C_RESET}"
+                echo ""
+                if global_whitelist_offer "Fail2Ban"; then
+                    info "Копирую IP из Глобального Белого Списка в Fail2Ban..."
+                    run_cmd cp -f "$global_file" "$F2B_WHITELIST_FILE" 2>/dev/null || true
+                    _f2b_update_ignoreip
+                    is_synced=true
+                    wait_for_enter
+                    continue
+                fi
+            fi
+        fi
+
         if [[ -s "$F2B_WHITELIST_FILE" ]]; then
             info "Текущий whitelist:"
             grep -v '^\s*#' "$F2B_WHITELIST_FILE" | grep -v '^\s*$' | while read -r ip; do
@@ -352,24 +385,36 @@ _f2b_whitelist_menu() {
                     err "Некорректный IP адрес."
                     continue
                 fi
-                if grep -q "$ip_to_add" "$F2B_WHITELIST_FILE"; then
-                    warn "IP $ip_to_add уже в whitelist."
+                
+                # Если у нас есть глобальный файл и они синхронизированы, то добавляем через глобальный менеджер!
+                if [[ -f "$global_file" && "$is_synced" == "true" ]] && command -v global_whitelist_add_ip &>/dev/null; then
+                    global_whitelist_add_ip "$ip_to_add" "Added via Fail2Ban menu"
                 else
-                    echo "$ip_to_add" | run_cmd tee -a "$F2B_WHITELIST_FILE" > /dev/null
-                    ok "IP $ip_to_add добавлен в whitelist."
-                    _f2b_update_ignoreip
+                    if grep -q "$ip_to_add" "$F2B_WHITELIST_FILE"; then
+                        warn "IP $ip_to_add уже в whitelist."
+                    else
+                        echo "$ip_to_add" | run_cmd tee -a "$F2B_WHITELIST_FILE" > /dev/null
+                        ok "IP $ip_to_add добавлен в whitelist."
+                        _f2b_update_ignoreip
+                    fi
                 fi
                 wait_for_enter
                 ;;
             2)
                 local ip_to_remove
                 ip_to_remove=$(ask_non_empty "Какой IP удалить?") || continue
-                if ! grep -q "$ip_to_remove" "$F2B_WHITELIST_FILE"; then
-                    err "IP $ip_to_remove не найден в whitelist."
+                
+                # Если у нас есть глобальный файл и они синхронизированы, то удаляем через глобальный менеджер!
+                if [[ -f "$global_file" && "$is_synced" == "true" ]] && command -v global_whitelist_remove_ip &>/dev/null; then
+                    global_whitelist_remove_ip "$ip_to_remove"
                 else
-                    run_cmd sed -i "/^${ip_to_remove}$/d" "$F2B_WHITELIST_FILE"
-                    ok "IP $ip_to_remove удален из whitelist."
-                    _f2b_update_ignoreip
+                    if ! grep -q "$ip_to_remove" "$F2B_WHITELIST_FILE"; then
+                        err "IP $ip_to_remove не найден в whitelist."
+                    else
+                        run_cmd sed -i "/^${ip_to_remove}$/d" "$F2B_WHITELIST_FILE"
+                        ok "IP $ip_to_remove удален из whitelist."
+                        _f2b_update_ignoreip
+                    fi
                 fi
                 wait_for_enter
                 ;;

@@ -307,13 +307,52 @@ _gwl_sync_fail2ban() {
         return
     fi
 
+    # Автоматически синхронизируем локальный файл Fail2Ban с глобальным белым списком
+    run_cmd cp -f "$GLOBAL_WHITELIST_FILE" "/etc/reshala/fail2ban-whitelist.txt" 2>/dev/null || true
+
     local ignoreip="127.0.0.1/8 ::1"
     for ip in "${ips[@]}"; do
         ignoreip="$ignoreip $ip"
     done
 
-    run_cmd sed -i -e "s,^ignoreip\s*=.*,ignoreip = $ignoreip," /etc/fail2ban/jail.local
-    run_cmd systemctl reload fail2ban 2>/dev/null || true
+    # Сверхнадежное обновление ignoreip с помощью Python
+    python3 - "$ignoreip" <<'PYEOF'
+import sys
+import re
+
+fpath = "/etc/fail2ban/jail.local"
+ignoreip_val = sys.argv[1]
+
+try:
+    with open(fpath, "r") as f:
+        content = f.read()
+
+    # Ищем ignoreip (любые отступы, опциональный комментарий #)
+    pattern = re.compile(r"^[ \t]*#?[ \t]*ignoreip[ \t]*=[ \t]*.*$", re.MULTILINE | re.IGNORECASE)
+
+    if pattern.search(content):
+        content = pattern.sub(f"ignoreip = {ignoreip_val}", content)
+    else:
+        # Если нет, ищем [DEFAULT]
+        default_pattern = re.compile(r"^\[DEFAULT\]", re.MULTILINE | re.IGNORECASE)
+        if default_pattern.search(content):
+            content = default_pattern.sub(f"[DEFAULT]\nignoreip = {ignoreip_val}", content, 1)
+        else:
+            content = f"[DEFAULT]\nignoreip = {ignoreip_val}\n\n" + content
+
+    with open(fpath, "w") as f:
+        f.write(content)
+except Exception as e:
+    sys.stderr.write(f"Error updating jail.local: {e}\n")
+    sys.exit(1)
+PYEOF
+
+    # Перезапускаем или перезагружаем Fail2Ban в зависимости от статуса
+    if systemctl is-active --quiet fail2ban; then
+        run_cmd systemctl reload fail2ban 2>/dev/null || run_cmd systemctl restart fail2ban 2>/dev/null || true
+    else
+        run_cmd systemctl start fail2ban 2>/dev/null || true
+    fi
     debug_log "GWL_SYNC: Fail2Ban ignoreip обновлен."
 }
 
